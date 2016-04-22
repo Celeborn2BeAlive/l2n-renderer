@@ -6,6 +6,8 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 add_subdirectory(third-party/submodules)
 
+find_package(OpenGL REQUIRED)
+
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(c2ba-glsl-shaders)
@@ -14,7 +16,8 @@ include(c2ba-copy-dll-post-build)
 file(
     GLOB_RECURSE
     L2N_SRC_FILES
-    *.cpp *.hpp *.glsl
+    src/*.cpp src/*.hpp src/*.glsl
+    third-party/glad/src/*.c
 )
 
 add_executable(
@@ -24,12 +27,16 @@ add_executable(
 
 target_link_libraries(
     l2n
+    ${OPENGL_LIBRARIES}
     glfw
 )
 
 target_include_directories(
     l2n
-    PUBLIC third-party/submodules/glfw/include
+    PUBLIC 
+    ${OPENGL_INCLUDE_DIRS}
+    third-party/submodules/glfw/include
+    third-party/glad/include
 )
 
 install(
