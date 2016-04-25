@@ -29,6 +29,8 @@ target_link_libraries(
     l2n
     ${OPENGL_LIBRARIES}
     glfw
+    c2ba_maths
+    c2ba_glutils
 )
 
 target_include_directories(
@@ -37,6 +39,8 @@ target_include_directories(
     ${OPENGL_INCLUDE_DIRS}
     third-party/submodules/glfw/include
     third-party/glad/include
+    third-party/submodules/c2ba/maths/lib/include
+    third-party/submodules/c2ba/glutils/lib/include
 )
 
 install(

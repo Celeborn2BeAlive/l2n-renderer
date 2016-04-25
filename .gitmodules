@@ -1,3 +1,12 @@
 [submodule "third-party/submodules/glfw"]
 	path = third-party/submodules/glfw
 	url = https://github.com/glfw/glfw.git
+[submodule "third-party/submodules/glm"]
+	path = third-party/submodules/glm
+	url = https://github.com/g-truc/glm
+[submodule "third-party/submodules/c2ba/maths"]
+	path = third-party/submodules/c2ba/maths
+	url = https://github.com/Celeborn2BeAlive/c2ba-maths.git
+[submodule "third-party/submodules/c2ba/glutils"]
+	path = third-party/submodules/c2ba/glutils
+	url = https://github.com/Celeborn2BeAlive/c2ba-glutils.git
