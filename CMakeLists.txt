@@ -20,6 +20,8 @@ file(
     third-party/glad/src/*.c
 )
 
+c2ba_add_shader_directory(src/shaders)
+
 add_executable(
     l2n
     ${L2N_SRC_FILES}

@@ -11,49 +11,35 @@
 #include <c2ba/glutils/GLShader.hpp>
 #include <c2ba/glutils/GLProgram.hpp>
 
+#include <filesystem>
+
 namespace l2n
 {
 
-const char* vertexShaderSource =
-    "#version 330\n"
-    "layout(location = 0) in vec3 iVertexPosition;"
-    "layout(location = 1) in vec3 iVertexColor;"
-    "out vec3 FragColor;"
-    "void main() {"
-    "FragColor = iVertexColor;"
-    "gl_Position = vec4(iVertexPosition, 1.f);"
-"}";
-
-const char* fragmentShaderSource =
-    "#version 330\n"
-    "in vec3 FragColor;"
-    "out vec4 oFragColor;"
-    "void main() {"
-    "oFragColor = vec4(FragColor, 1.f);"
-"}";
+namespace fs = std::experimental::filesystem;
 
 int main(int argc, char** argv)
 {
-    GLFWwindow* window;
+    fs::path appPath{ argv[0] };
+    auto appDir = appPath.parent_path();
 
-    /* Initialize the library */
-    if (!glfwInit())
+    if (!glfwInit()) {
+        std::cerr << "Unable to init GLFW.\n";
         return -1;
-
-    /* Create a windowed mode window and its OpenGL context */
-    window = glfwCreateWindow(640, 480, "Hello World", NULL, NULL);
-    if (!window)
-    { 
+    }
+        
+    auto window = glfwCreateWindow(640, 480, "Hello World", NULL, NULL);
+    if (!window) { 
+        std::cerr << "Unable to open window.\n";
         glfwTerminate();
         return -1;
     }
 
-    /* Make the window's context current */
     glfwMakeContextCurrent(window);
 
     if (!gladLoadGL()) {
-        printf("Something went wrong!\n");
-        exit(-1);
+        std::cerr << "Unable to init OpenGL.\n";
+        return -1;
     }
 
     GLfloat vertices[] = {
@@ -62,6 +48,7 @@ int main(int argc, char** argv)
         0., 0.5,/* Position */ 0., 0., 1. /* Couleur */ // Troisème vertex
     };
 
+    
     c2ba::GLBufferStorage<GLfloat> vbo{ sizeof(vertices) / sizeof(float), vertices };
     c2ba::GLVertexArray vao;
 
@@ -75,14 +62,14 @@ int main(int argc, char** argv)
 
     {
         c2ba::GLShader vertexShader{ GL_VERTEX_SHADER };
-        vertexShader.setSource(vertexShaderSource);
+        vertexShader.setSource(c2ba::loadShaderSource(appDir / "glsl/triangle.vs.glsl"));
         vertexShader.compile();
         if (!vertexShader.getCompileStatus()) {
             std::cerr << "Vertex Shader error:" << vertexShader.getInfoLog() << std::endl;
         }
 
         c2ba::GLShader fragmentShader{ GL_FRAGMENT_SHADER };
-        fragmentShader.setSource(fragmentShaderSource);
+        fragmentShader.setSource(c2ba::loadShaderSource(appDir / "glsl/triangle.fs.glsl"));
         fragmentShader.compile();
         if (!fragmentShader.getCompileStatus()) {
             std::cerr << "Fragment Shader error:" << fragmentShader.getInfoLog() << std::endl;
