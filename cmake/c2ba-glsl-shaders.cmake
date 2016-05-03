@@ -22,9 +22,9 @@
 # The compilation target for glsl shaders is a copy in a "glsl" folder located in the executable directory, with the same file path layout
 # Recognized extensions:
 #  - *.glsl : vertex shader
-macro(c2ba_add_shader_directory directory)
-    file(GLOB_RECURSE relative_files RELATIVE ${directory} ${directory}/*.glsl)
-    file(GLOB_RECURSE files ${directory}/*.glsl)
+macro(c2ba_add_shader_directory src_directory dst_directory)
+    file(GLOB_RECURSE relative_files RELATIVE ${src_directory} ${src_directory}/*.glsl)
+    file(GLOB_RECURSE files ${src_directory}/*.glsl)
 
     if(files)
         list(LENGTH files file_count)
@@ -35,9 +35,9 @@ macro(c2ba_add_shader_directory directory)
             list(GET relative_files ${idx} relative_file)
 
             if(MSVC)
-                set(SHADER_OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}//\$\(Configuration\)/glsl/${relative_file})
+                set(SHADER_OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}//\$\(Configuration\)/${dst_directory}/${relative_file})
             else()
-                set(SHADER_OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}/glsl/${relative_file})
+                set(SHADER_OUTPUT_PATH ${CMAKE_CURRENT_BINARY_DIR}/${dst_directory}/${relative_file})
             endif()
 
             add_custom_command(

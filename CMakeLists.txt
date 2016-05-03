@@ -20,7 +20,7 @@ file(
     third-party/glad/src/*.c
 )
 
-c2ba_add_shader_directory(src/shaders)
+c2ba_add_shader_directory(${CMAKE_CURRENT_SOURCE_DIR}/src/shaders glsl)
 
 add_executable(
     l2n
@@ -44,6 +44,8 @@ target_include_directories(
     third-party/submodules/c2ba/maths/lib/include
     third-party/submodules/c2ba/glutils/lib/include
 )
+
+source_group ("glsl" REGULAR_EXPRESSION "*.glsl")
 
 install(
     TARGETS l2n
