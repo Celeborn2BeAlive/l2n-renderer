@@ -40,6 +40,7 @@ target_include_directories(
     PUBLIC 
     ${OPENGL_INCLUDE_DIRS}
     third-party/submodules/glfw/include
+    third-party/submodules/glm
     third-party/glad/include
     third-party/submodules/c2ba/maths/lib/include
     third-party/submodules/c2ba/glutils/lib/include

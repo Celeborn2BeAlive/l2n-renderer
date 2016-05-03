@@ -10,6 +10,10 @@
 #include <c2ba/glutils/GLVertexArray.hpp>
 #include <c2ba/glutils/GLShader.hpp>
 #include <c2ba/glutils/GLProgram.hpp>
+#include <c2ba/glutils/GLTexture.hpp>
+#include <c2ba/glutils/GLFramebuffer.hpp>
+
+#include <c2ba/maths/types.hpp>
 
 #include <filesystem>
 #include <unordered_map>
@@ -84,6 +88,67 @@ c2ba::GLProgram compileProgram(const ShaderLibrary& shaderLibrary, std::vector<f
     return program;
 }
 
+#ifndef _WIN32
+#define sprintf_s snprintf
+#endif
+
+static void formatDebugOutput(char outStr[], size_t outStrSize, GLenum source, GLenum type,
+    GLuint id, GLenum severity, const char *msg)
+{
+    char sourceStr[32];
+    const char *sourceFmt = "UNDEFINED(0x%04X)";
+    switch (source)
+
+    {
+    case GL_DEBUG_SOURCE_API_ARB:             sourceFmt = "API"; break;
+    case GL_DEBUG_SOURCE_WINDOW_SYSTEM_ARB:   sourceFmt = "WINDOW_SYSTEM"; break;
+    case GL_DEBUG_SOURCE_SHADER_COMPILER_ARB: sourceFmt = "SHADER_COMPILER"; break;
+    case GL_DEBUG_SOURCE_THIRD_PARTY_ARB:     sourceFmt = "THIRD_PARTY"; break;
+    case GL_DEBUG_SOURCE_APPLICATION_ARB:     sourceFmt = "APPLICATION"; break;
+    case GL_DEBUG_SOURCE_OTHER_ARB:           sourceFmt = "OTHER"; break;
+    }
+
+    sprintf_s(sourceStr, 32, sourceFmt, source);
+
+    char typeStr[32];
+    const char *typeFmt = "UNDEFINED(0x%04X)";
+    switch (type)
+    {
+
+    case GL_DEBUG_TYPE_ERROR_ARB:               typeFmt = "ERROR"; break;
+    case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR_ARB: typeFmt = "DEPRECATED_BEHAVIOR"; break;
+    case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR_ARB:  typeFmt = "UNDEFINED_BEHAVIOR"; break;
+    case GL_DEBUG_TYPE_PORTABILITY_ARB:         typeFmt = "PORTABILITY"; break;
+    case GL_DEBUG_TYPE_PERFORMANCE_ARB:         typeFmt = "PERFORMANCE"; break;
+    case GL_DEBUG_TYPE_OTHER_ARB:               typeFmt = "OTHER"; break;
+    }
+    sprintf_s(typeStr, 32, typeFmt, type);
+
+
+    char severityStr[32];
+    const char *severityFmt = "UNDEFINED";
+    switch (severity)
+    {
+    case GL_DEBUG_SEVERITY_HIGH_ARB:   severityFmt = "HIGH";   break;
+    case GL_DEBUG_SEVERITY_MEDIUM_ARB: severityFmt = "MEDIUM"; break;
+    case GL_DEBUG_SEVERITY_LOW_ARB:    severityFmt = "LOW"; break;
+    case GL_DEBUG_SEVERITY_NOTIFICATION:    severityFmt = "NOTIFICATION"; break;
+    }
+
+    sprintf_s(severityStr, 32, severityFmt, severity);
+
+    sprintf_s(outStr, outStrSize, "OpenGL: %s [source=%s type=%s severity=%s id=%d]",
+        msg, sourceStr, typeStr, severityStr, id);
+}
+
+static void debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity,
+    GLsizei length, const GLchar* message, GLvoid* userParam)
+{
+    char finalMessage[256];
+    formatDebugOutput(finalMessage, 256, source, type, id, severity, message);
+    std::cerr << finalMessage << "\n";
+}
+
 int main(int argc, char** argv)
 {
     fs::path appPath{ argv[0] };
@@ -93,8 +158,17 @@ int main(int argc, char** argv)
         std::cerr << "Unable to init GLFW.\n";
         return -1;
     }
-        
-    auto window = glfwCreateWindow(640, 480, "Hello World", NULL, NULL);
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
+    glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
+
+    size_t windowWidth = 1280;
+    size_t windowHeight = 720;
+    
+    auto window = glfwCreateWindow(windowWidth, windowHeight, "Les lumieres de Noel", NULL, NULL);
     if (!window) { 
         std::cerr << "Unable to open window.\n";
         glfwTerminate();
@@ -108,13 +182,16 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    glDebugMessageCallback((GLDEBUGPROCARB)debugCallback, nullptr);
+    //glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+
     GLfloat vertices[] = {
         -0.5, -0.5,/* Position */ 1., 0., 0., /* Couleur */ // Premier vertex
         0.5, -0.5,/* Position */ 0., 1., 0., /* Couleur */ // Deuxième vertex
         0., 0.5,/* Position */ 0., 0., 1. /* Couleur */ // Troisème vertex
     };
 
-    
     c2ba::GLBufferStorage<GLfloat> vbo{ sizeof(vertices) / sizeof(float), vertices };
     c2ba::GLVertexArray vao;
 
@@ -132,13 +209,42 @@ int main(int argc, char** argv)
 
     program.use();
 
+    size_t framebufferWidth = 1024;
+    size_t framebufferHeight = 748;
+
+    c2ba::GLFramebuffer2D<1, false> framebuffer;
+    framebuffer.init(framebufferWidth, framebufferHeight, { GL_RGBA32F }, GL_NEAREST);
+
+    std::vector<c2ba::float4> pixels(framebufferWidth * framebufferHeight);
+    for (auto j = 0u; j < framebufferHeight; ++j) {
+        for (auto i = 0u; i < framebufferWidth; ++i) {
+            pixels[i + j * framebufferWidth] = c2ba::float4(float(i) / framebufferWidth, float(j) / framebufferHeight, 0, 1);
+        }
+    }
+
+    framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, pixels.data());
+
+    // Draw on screen
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
     /* Loop until the user closes the window */
     while (!glfwWindowShouldClose(window))
     {
-        /* Render here */
-        vao.bind();
+        glClear(GL_COLOR_BUFFER_BIT);
 
-        glDrawArrays(GL_TRIANGLES, 0 /* Pas d'offset au début du VBO */, 3);
+        /* Render here */
+        //vao.bind();
+
+        //glDrawArrays(GL_TRIANGLES, 0 /* Pas d'offset au début du VBO */, 3);
+
+        framebuffer.bindForReading();
+        framebuffer.setReadBuffer(0);
+
+        glBlitFramebuffer(0, 0, framebufferWidth, framebufferHeight,
+            0, 0, windowWidth, windowHeight,
+            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
         /* Swap front and back buffers */
         glfwSwapBuffers(window);
