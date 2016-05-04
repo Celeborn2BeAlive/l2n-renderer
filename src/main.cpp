@@ -12,6 +12,7 @@
 #include <c2ba/glutils/GLProgram.hpp>
 #include <c2ba/glutils/GLTexture.hpp>
 #include <c2ba/glutils/GLFramebuffer.hpp>
+#include <c2ba/glutils/GLUniform.hpp>
 
 #include <c2ba/maths/types.hpp>
 
@@ -42,7 +43,9 @@ c2ba::GLShader loadShader(const fs::path& shaderPath)
     using StringType = fs::path;
     static auto extToShaderType = std::unordered_map<StringType, std::pair<GLenum, std::string>>({
         { ".vs", { GL_VERTEX_SHADER, "vertex" } },
-        { ".fs", { GL_FRAGMENT_SHADER, "fragment" } }
+        { ".fs", { GL_FRAGMENT_SHADER, "fragment" } },
+        { ".gs",{ GL_GEOMETRY_SHADER, "geometry" } },
+        { ".cs",{ GL_COMPUTE_SHADER, "compute" } }
     });
 
     auto ext = shaderPath.stem().extension();
@@ -149,14 +152,32 @@ static void debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity
     std::cerr << finalMessage << "\n";
 }
 
-int main(int argc, char** argv)
+class Application 
 {
-    fs::path appPath{ argv[0] };
-    auto appDir = appPath.parent_path();
+public:
+    Application(int argc, char** argv);
+
+    int run();
+private:
+    fs::path m_AppPath;
+    fs::path m_ShadersRootPath;
+
+    size_t m_nWindowWidth = 1280;
+    size_t m_nWindowHeight = 720;
+
+    GLFWwindow* m_pWindow = nullptr;
+
+    ShaderLibrary m_ShaderLibrary;
+};
+
+Application::Application(int argc, char** argv)
+{
+    m_AppPath = fs::path{ argv[0] };
+    auto appDir = m_AppPath.parent_path();
 
     if (!glfwInit()) {
         std::cerr << "Unable to init GLFW.\n";
-        return -1;
+        throw std::runtime_error("Unable to init GLFW.\n");
     }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -165,95 +186,82 @@ int main(int argc, char** argv)
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
 
-    size_t windowWidth = 1280;
-    size_t windowHeight = 720;
-    
-    auto window = glfwCreateWindow(windowWidth, windowHeight, "Les lumieres de Noel", NULL, NULL);
-    if (!window) { 
+    m_pWindow = glfwCreateWindow(m_nWindowWidth, m_nWindowHeight, "Les lumieres de Noel", NULL, NULL);
+    if (!m_pWindow) {
         std::cerr << "Unable to open window.\n";
         glfwTerminate();
-        return -1;
+        throw std::runtime_error("Unable to open window.\n");
     }
 
-    glfwMakeContextCurrent(window);
+    glfwMakeContextCurrent(m_pWindow);
 
     if (!gladLoadGL()) {
         std::cerr << "Unable to init OpenGL.\n";
-        return -1;
+        throw std::runtime_error("Unable to init OpenGL.\n");
     }
 
     glDebugMessageCallback((GLDEBUGPROCARB)debugCallback, nullptr);
     //glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
     glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 
-    GLfloat vertices[] = {
-        -0.5, -0.5,/* Position */ 1., 0., 0., /* Couleur */ // Premier vertex
-        0.5, -0.5,/* Position */ 0., 1., 0., /* Couleur */ // Deuxième vertex
-        0., 0.5,/* Position */ 0., 0., 1. /* Couleur */ // Troisème vertex
-    };
+    m_ShadersRootPath = appDir / "glsl";
+    loadShaders(m_ShadersRootPath, m_ShaderLibrary);
+}
 
-    c2ba::GLBufferStorage<GLfloat> vbo{ sizeof(vertices) / sizeof(float), vertices };
-    c2ba::GLVertexArray vao;
-
-    vao.enableVertexAttrib(0);
-    vao.vertexAttribOffset(vbo.glId(), 0, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), 0);
-
-    vao.enableVertexAttrib(1);
-    vao.vertexAttribOffset(vbo.glId(), 1, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), 2 * sizeof(GLfloat));
-
-    ShaderLibrary shaderLibrary;
-    auto shadersRoot = appDir / "glsl";
-    loadShaders(shadersRoot, shaderLibrary);
-
-    auto program = compileProgram(shaderLibrary, { shadersRoot / "triangle.vs.glsl", shadersRoot / "triangle.fs.glsl" });
-
-    program.use();
+int Application::run()
+{
+    auto uvProgram = compileProgram(m_ShaderLibrary, { m_ShadersRootPath / "sphere_pathtracing.cs.glsl" });
+    c2ba::GLUniform<c2ba::GLSLImage2Df> uOutputImage{ uvProgram, "uOutputImage" };
+    uOutputImage.set(uvProgram, 0);
+    c2ba::GLUniform<GLuint> uIterationCount{ uvProgram, "uIterationCount" };
 
     size_t framebufferWidth = 1024;
     size_t framebufferHeight = 748;
 
+    auto numGroupX = (framebufferWidth / 32) + (framebufferWidth % 32 != 0);
+    auto numGroupY = (framebufferHeight / 32) + (framebufferHeight % 32 != 0);
+
     c2ba::GLFramebuffer2D<1, false> framebuffer;
     framebuffer.init(framebufferWidth, framebufferHeight, { GL_RGBA32F }, GL_NEAREST);
+    framebuffer.getColorBuffer(0).bindImage(0, 0, GL_WRITE_ONLY, GL_RGBA32F);
 
     std::vector<c2ba::float4> pixels(framebufferWidth * framebufferHeight);
     for (auto j = 0u; j < framebufferHeight; ++j) {
         for (auto i = 0u; i < framebufferWidth; ++i) {
-            pixels[i + j * framebufferWidth] = c2ba::float4(float(i) / framebufferWidth, float(j) / framebufferHeight, 0, 1);
+            pixels[i + j * framebufferWidth] = c2ba::float4(float(i) / framebufferWidth, float(j) / framebufferHeight, 1, 1);
         }
     }
 
     framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, pixels.data());
 
+    uvProgram.use();
+
     // Draw on screen
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
     /* Loop until the user closes the window */
-    while (!glfwWindowShouldClose(window))
-    {
+    for (auto iterationCount = 0; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
+        uIterationCount.set(iterationCount);
+        glDispatchCompute(numGroupX, numGroupY, 1);
+
         glClear(GL_COLOR_BUFFER_BIT);
-
-        /* Render here */
-        //vao.bind();
-
-        //glDrawArrays(GL_TRIANGLES, 0 /* Pas d'offset au début du VBO */, 3);
 
         framebuffer.bindForReading();
         framebuffer.setReadBuffer(0);
 
         glBlitFramebuffer(0, 0, framebufferWidth, framebufferHeight,
-            0, 0, windowWidth, windowHeight,
+            0, 0, m_nWindowWidth, m_nWindowHeight,
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
         /* Swap front and back buffers */
-        glfwSwapBuffers(window);
+        glfwSwapBuffers(m_pWindow);
 
         /* Poll for and process events */
         glfwPollEvents();
     }
 
-    glfwTerminate();
     return 0;
 }
 
@@ -261,5 +269,6 @@ int main(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
-    return l2n::main(argc, argv);
+    l2n::Application app(argc, argv);
+    return app.run();
 }
