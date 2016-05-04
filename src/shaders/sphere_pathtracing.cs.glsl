@@ -9,8 +9,8 @@ struct PhongMaterial {
 };
 
 struct Sphere {
-    vec3 position;
-    float radius;
+    vec3 center;
+    float sqrRadius;
     uint materialID;
     uvec3 align0;
 };
@@ -30,29 +30,69 @@ struct DirectionalLight {
 };
 
 uniform uint uIterationCount;
-uniform mat4 uViewProjectionMatrix;
+uniform mat4 uRcpViewProjMatrix; // Transform normalized device coordinates to world space
+uniform vec3 uCameraPosition;
 
-layout(std430) buffer MaterialBuffer {
-    uint materialCount;
+
+uniform uint uMaterialCount;
+
+layout(std430, binding = 0) buffer MaterialBuffer {
     PhongMaterial materialArray[];
 };
 
-layout(std430) buffer SphereBuffer {
-    uint sphereCount;
+uniform uint uSphereCount;
+
+layout(std430, binding = 1) buffer SphereBuffer {
     Sphere sphereArray[];
 };
 
-layout(std430) buffer PointLightBuffer {
-    uint pointLightCount;
+uniform uint uPointLightCount;
+
+layout(std430, binding = 2) buffer PointLightBuffer {
     PointLight pointLightArray[];
 };
 
-layout(std430) buffer DirectionalLightBuffer {
-    uint directionalLightCount;
+uniform uint uDirectionalLightCount;
+
+layout(std430, binding = 3) buffer DirectionalLightBuffer {
     DirectionalLight directionalLightArray[];
 };
 
 writeonly uniform image2D uOutputImage;
+
+float intersectSphere(vec3 org, vec3 dir, Sphere sphere, out vec3 position, out vec3 normal) {
+    vec3 centerOrg = org - sphere.center;
+    float a = 1;
+    float b = 2 * dot(centerOrg, dir);
+    float c = dot(centerOrg, centerOrg) - sphere.sqrRadius;
+    float discriminant = b * b - 4 * a * c;
+    if (discriminant < 0.) {
+        return -1.;
+    }
+    float sqrtDiscriminant = sqrt(discriminant);
+    float t1 = 0.5 * (-b - sqrtDiscriminant) / a;
+    float t2 = 0.5 * (-b + sqrtDiscriminant) / a;
+    float t = t1 >= 0.f ? t1 : t2;
+
+    position = org + t * dir;
+    normal = normalize(position - sphere.center);
+
+    return t;
+}
+
+float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal) {
+    float currentDist = -1;
+    for (uint i = 0; i < uSphereCount; ++i) {
+        vec3 tmpPos, tmpNormal;
+        float t = intersectSphere(org, dir, sphereArray[i], tmpPos, tmpNormal);
+        if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
+            currentDist = t;
+            position = tmpPos;
+            normal = tmpNormal;
+        }
+    }
+    return currentDist;
+}
 
 void main() {
     ivec2 framebufferSize = imageSize(uOutputImage);
@@ -62,10 +102,23 @@ void main() {
         return;
     }
 
-    float radius = abs(cos(0.01 * float(uIterationCount)));
-    vec2 normalizedPosition = 2.0 * ((vec2(pixelCoords) + vec2(0.5)) / vec2(framebufferSize) - vec2(0.5));
-    float sqrDist = 2 * abs(radius * radius - dot(normalizedPosition, normalizedPosition));
+    vec3 finalColor = vec3(0);
 
-    vec2 uv = vec2(pixelCoords) / vec2(framebufferSize);
-    imageStore(uOutputImage, pixelCoords, vec4(abs(sin(0.02 * float(uIterationCount))), uv * sqrDist, 0));
+    vec2 rasterCoords = (vec2(pixelCoords) + vec2(0.5)) / vec2(framebufferSize); // Center of pixel between 0 and 1 for each axis
+    vec4 ndCoords = vec4(-1, -1, -1, 1) + vec4(2.0 * rasterCoords, 0, 0); // Normalized device coordinates
+    vec4 viewCoords = uRcpViewProjMatrix * ndCoords;
+    viewCoords /= viewCoords.w;
+
+    //vec4 viewCoords = vec4(rasterCoords, -1, 0);
+
+    vec3 dir = normalize(viewCoords.xyz - uCameraPosition);
+    vec3 org = uCameraPosition;
+
+    vec3 position, normal;
+    float dist = intersectScene(org, dir, position, normal);
+    if (dist >= 0.f) {
+        finalColor = normal;
+    }
+    
+    imageStore(uOutputImage, pixelCoords, vec4(finalColor, 0));
 }

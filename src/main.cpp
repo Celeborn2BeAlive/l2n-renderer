@@ -15,9 +15,14 @@
 #include <c2ba/glutils/GLUniform.hpp>
 
 #include <c2ba/maths/types.hpp>
+#include <c2ba/maths/geometry.hpp>
+#include <c2ba/maths/sampling/Random.hpp>
 
 #include <filesystem>
 #include <unordered_map>
+
+#include "shaders.hpp"
+#include "ViewController.hpp"
 
 namespace fs = std::experimental::filesystem;
 
@@ -147,8 +152,8 @@ static void formatDebugOutput(char outStr[], size_t outStrSize, GLenum source, G
 static void debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity,
     GLsizei length, const GLchar* message, GLvoid* userParam)
 {
-    char finalMessage[256];
-    formatDebugOutput(finalMessage, 256, source, type, id, severity, message);
+    char finalMessage[2048];
+    formatDebugOutput(finalMessage, 2048, source, type, id, severity, message);
     std::cerr << finalMessage << "\n";
 }
 
@@ -186,7 +191,7 @@ Application::Application(int argc, char** argv)
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
 
-    m_pWindow = glfwCreateWindow(m_nWindowWidth, m_nWindowHeight, "Les lumieres de Noel", NULL, NULL);
+    m_pWindow = glfwCreateWindow(int(m_nWindowWidth), int(m_nWindowHeight), "Les lumieres de Noel", NULL, NULL);
     if (!m_pWindow) {
         std::cerr << "Unable to open window.\n";
         glfwTerminate();
@@ -208,18 +213,37 @@ Application::Application(int argc, char** argv)
     loadShaders(m_ShadersRootPath, m_ShaderLibrary);
 }
 
+struct Sphere {
+    c2ba::float3 center;
+    float sqrRadius;
+    uint32_t materialID;
+    c2ba::uint3 align0;
+
+    Sphere(const c2ba::float3& center, float radius) :
+        center(center), sqrRadius(radius * radius), materialID(0) {
+    }
+};
+
 int Application::run()
 {
+    auto worldSize = 256.f;
+    ViewController viewController{ m_pWindow, worldSize / 10.f };
+
     auto uvProgram = compileProgram(m_ShaderLibrary, { m_ShadersRootPath / "sphere_pathtracing.cs.glsl" });
     c2ba::GLUniform<c2ba::GLSLImage2Df> uOutputImage{ uvProgram, "uOutputImage" };
     uOutputImage.set(uvProgram, 0);
     c2ba::GLUniform<GLuint> uIterationCount{ uvProgram, "uIterationCount" };
+    c2ba::GLUniform<c2ba::GLfloat4x4> uRcpViewProjMatrix{ uvProgram, "uRcpViewProjMatrix" };
+    c2ba::GLUniform<c2ba::GLfloat3> uCameraPosition{ uvProgram, "uCameraPosition" };
+    c2ba::GLUniform<GLuint> uSphereCount{ uvProgram, "uSphereCount" };
 
-    size_t framebufferWidth = 1024;
-    size_t framebufferHeight = 748;
+    size_t framebufferWidth = m_nWindowWidth;
+    size_t framebufferHeight = m_nWindowHeight;
 
-    auto numGroupX = (framebufferWidth / 32) + (framebufferWidth % 32 != 0);
-    auto numGroupY = (framebufferHeight / 32) + (framebufferHeight % 32 != 0);
+    const auto& projMatrix = c2ba::perspective(45.f, float(framebufferWidth) / framebufferHeight, 0.01f, 100.f);
+
+    auto numGroupX = GLuint((framebufferWidth / 32) + (framebufferWidth % 32 != 0));
+    auto numGroupY = GLuint((framebufferHeight / 32) + (framebufferHeight % 32 != 0));
 
     c2ba::GLFramebuffer2D<1, false> framebuffer;
     framebuffer.init(framebufferWidth, framebufferHeight, { GL_RGBA32F }, GL_NEAREST);
@@ -228,7 +252,7 @@ int Application::run()
     std::vector<c2ba::float4> pixels(framebufferWidth * framebufferHeight);
     for (auto j = 0u; j < framebufferHeight; ++j) {
         for (auto i = 0u; i < framebufferWidth; ++i) {
-            pixels[i + j * framebufferWidth] = c2ba::float4(float(i) / framebufferWidth, float(j) / framebufferHeight, 1, 1);
+            pixels[i + j * framebufferWidth] = c2ba::float4(0, 0, 0, 0);
         }
     }
 
@@ -239,9 +263,28 @@ int Application::run()
     // Draw on screen
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
+    auto sphereCount = 1024;
+    c2ba::RandomGenerator rng;
+    
+    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, nullptr, GL_MAP_WRITE_BIT);
+    auto spherePtr = sphereBuffer.map(GL_WRITE_ONLY);
+    for (auto i = 0; i < sphereCount; ++i) {
+        spherePtr[i] = Sphere{ c2ba::float3(-worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat()), 0.1f * worldSize * rng.getFloat() };
+    }
+    sphereBuffer.unmap();
+
+    sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
+
     /* Loop until the user closes the window */
     for (auto iterationCount = 0; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
+        auto seconds = glfwGetTime();
+
         uIterationCount.set(iterationCount);
+        auto rcpViewProjMatrix = c2ba::inverse(projMatrix * viewController.getViewMatrix());
+        uRcpViewProjMatrix.set(c2ba::value_ptr(rcpViewProjMatrix));
+        uCameraPosition.set(c2ba::value_ptr(viewController.getRcpViewMatrix()[3]));
+        uSphereCount.set(GLuint(sphereBuffer.size()));
+
         glDispatchCompute(numGroupX, numGroupY, 1);
 
         glClear(GL_COLOR_BUFFER_BIT);
@@ -249,8 +292,9 @@ int Application::run()
         framebuffer.bindForReading();
         framebuffer.setReadBuffer(0);
 
-        glBlitFramebuffer(0, 0, framebufferWidth, framebufferHeight,
-            0, 0, m_nWindowWidth, m_nWindowHeight,
+        glBlitFramebuffer(
+            0, 0, GLint(framebufferWidth), GLint(framebufferHeight),
+            0, 0, GLint(m_nWindowWidth), GLint(m_nWindowHeight),
             GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
@@ -260,6 +304,9 @@ int Application::run()
 
         /* Poll for and process events */
         glfwPollEvents();
+
+        auto ellapsedTime = glfwGetTime() - seconds;
+        viewController.update(float(ellapsedTime));
     }
 
     return 0;
