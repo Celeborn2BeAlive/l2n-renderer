@@ -154,7 +154,7 @@ static void debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity
 {
     char finalMessage[2048];
     formatDebugOutput(finalMessage, 2048, source, type, id, severity, message);
-    std::cerr << finalMessage << "\n";
+    std::cerr << finalMessage << "\n\n";
 }
 
 class Application 
@@ -224,18 +224,33 @@ struct Sphere {
     }
 };
 
+enum ImageBindings 
+{
+    OUTPUT_IMAGE_BINDING = 0,
+    RANDOM_STATE_IMAGE_BINDING = 1,
+    ACCUM_IMAGE_BINDING = 2
+};
+
 int Application::run()
 {
+    c2ba::RandomGenerator rng;
+
     auto worldSize = 256.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
 
-    auto uvProgram = compileProgram(m_ShaderLibrary, { m_ShadersRootPath / "sphere_pathtracing.cs.glsl" });
-    c2ba::GLUniform<c2ba::GLSLImage2Df> uOutputImage{ uvProgram, "uOutputImage" };
-    uOutputImage.set(uvProgram, 0);
-    c2ba::GLUniform<GLuint> uIterationCount{ uvProgram, "uIterationCount" };
-    c2ba::GLUniform<c2ba::GLfloat4x4> uRcpViewProjMatrix{ uvProgram, "uRcpViewProjMatrix" };
-    c2ba::GLUniform<c2ba::GLfloat3> uCameraPosition{ uvProgram, "uCameraPosition" };
-    c2ba::GLUniform<GLuint> uSphereCount{ uvProgram, "uSphereCount" };
+    auto program = compileProgram(m_ShaderLibrary, { m_ShadersRootPath / "sphere_pathtracing.cs.glsl" });
+    program.use();
+
+    c2ba::GLUniform<c2ba::GLSLImage2Df> uOutputImage{ program, "uOutputImage" };
+    uOutputImage.set(program, OUTPUT_IMAGE_BINDING);
+    c2ba::GLUniform<c2ba::GLSLImage2Df> uRandomStateImage{ program, "uRandomStateImage" };
+    uRandomStateImage.set(program, RANDOM_STATE_IMAGE_BINDING);
+    c2ba::GLUniform<c2ba::GLSLImage2Df> uAccumImage{ program, "uAccumImage" };
+    uAccumImage.set(program, ACCUM_IMAGE_BINDING);
+    c2ba::GLUniform<GLuint> uIterationCount{ program, "uIterationCount" };
+    c2ba::GLUniform<c2ba::GLfloat4x4> uRcpViewProjMatrix{ program, "uRcpViewProjMatrix" };
+    c2ba::GLUniform<c2ba::GLfloat3> uCameraPosition{ program, "uCameraPosition" };
+    c2ba::GLUniform<GLuint> uSphereCount{ program, "uSphereCount" };
 
     size_t framebufferWidth = m_nWindowWidth;
     size_t framebufferHeight = m_nWindowHeight;
@@ -247,32 +262,50 @@ int Application::run()
 
     c2ba::GLFramebuffer2D<1, false> framebuffer;
     framebuffer.init(framebufferWidth, framebufferHeight, { GL_RGBA32F }, GL_NEAREST);
-    framebuffer.getColorBuffer(0).bindImage(0, 0, GL_WRITE_ONLY, GL_RGBA32F);
+    framebuffer.getColorBuffer(0).bindImage(OUTPUT_IMAGE_BINDING, 0, GL_WRITE_ONLY, GL_RGBA32F);
+    framebuffer.getColorBuffer(0).clear(0, GL_RGBA, GL_FLOAT, c2ba::value_ptr(c2ba::float4(0)));
 
-    std::vector<c2ba::float4> pixels(framebufferWidth * framebufferHeight);
-    for (auto j = 0u; j < framebufferHeight; ++j) {
-        for (auto i = 0u; i < framebufferWidth; ++i) {
-            pixels[i + j * framebufferWidth] = c2ba::float4(0, 0, 0, 0);
-        }
+    c2ba::GLTexture2D randomImage;
+    randomImage.setStorage(1, GL_RGBA32UI, framebufferWidth, framebufferHeight);
+    randomImage.bindImage(RANDOM_STATE_IMAGE_BINDING, 0, GL_READ_WRITE, GL_RGBA32UI);
+    {
+        std::vector<c2ba::uint4> pixels(framebufferWidth * framebufferHeight);
+        std::generate(begin(pixels), end(pixels), [&]() {
+            auto randomState = c2ba::uint4(0);
+            for (auto i = 0; i < 4; ++i) {
+                while (randomState[i] <= 128) {
+                    randomState[i] = rng.getUInt();
+                }
+            }
+            return randomState;
+        });
+        randomImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels.data());
     }
 
-    framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, pixels.data());
-
-    uvProgram.use();
-
+    c2ba::GLTexture2D accumImage;
+    accumImage.setStorage(1, GL_RGBA32F, framebufferWidth, framebufferHeight);
+    accumImage.bindImage(ACCUM_IMAGE_BINDING, 0, GL_READ_WRITE, GL_RGBA32F);
+    accumImage.clear(0, GL_RGBA, GL_FLOAT, c2ba::value_ptr(c2ba::float4(0)));
+    
     // Draw on screen
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
     auto sphereCount = 1024;
-    c2ba::RandomGenerator rng;
-    
-    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, nullptr, GL_MAP_WRITE_BIT);
-    auto spherePtr = sphereBuffer.map(GL_WRITE_ONLY);
-    for (auto i = 0; i < sphereCount; ++i) {
-        spherePtr[i] = Sphere{ c2ba::float3(-worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat()), 0.1f * worldSize * rng.getFloat() };
-    }
-    sphereBuffer.unmap();
+    auto computeSpheres = [&]() {
+        std::vector<Sphere> spheres;
+        for (auto i = 0; i < sphereCount; ++i) {
+            spheres.emplace_back(
+                c2ba::float3(-worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat()),
+                0.1f * worldSize * rng.getFloat()
+                );
+        }
+        return spheres;
+    };
 
+    // #todo improve buffer interface to be able to pass a memory layout instead of a single type
+    // Something like GLBuffer<GLBufferLayout<GLuint, Sphere[]>> myBuffer;
+    // Only one unspecified sized array allows, at the end of the type list
+    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, computeSpheres().data(), 0);
     sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
 
     /* Loop until the user closes the window */
@@ -299,14 +332,16 @@ int Application::run()
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
-        /* Swap front and back buffers */
-        glfwSwapBuffers(m_pWindow);
-
         /* Poll for and process events */
         glfwPollEvents();
 
+        /* Swap front and back buffers*/
+        glfwSwapBuffers(m_pWindow);
+
         auto ellapsedTime = glfwGetTime() - seconds;
-        viewController.update(float(ellapsedTime));
+        if (viewController.update(float(ellapsedTime))) {
+            accumImage.clear(0, GL_RGBA, GL_FLOAT, c2ba::value_ptr(c2ba::float4(0)));
+        }
     }
 
     return 0;
