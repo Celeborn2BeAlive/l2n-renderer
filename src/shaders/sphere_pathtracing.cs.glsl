@@ -367,8 +367,8 @@ float intersectSphere(vec3 org, vec3 dir, Sphere sphere, out vec3 position, out 
         return -1.;
     }
     float sqrtDiscriminant = sqrt(discriminant);
-    float t1 = 0.5 * (-b - sqrtDiscriminant) / a;
-    float t2 = 0.5 * (-b + sqrtDiscriminant) / a;
+    float t1 = 0.5 * (-b - sqrtDiscriminant);
+    float t2 = 0.5 * (-b + sqrtDiscriminant);
     float t = (t1 >= 0.f) ? t1 : t2;
 
     position = org + t * dir;
