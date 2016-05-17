@@ -24,6 +24,8 @@
 #include "shaders.hpp"
 #include "ViewController.hpp"
 
+#include "tinymt32.hpp"
+
 namespace fs = std::experimental::filesystem;
 
 namespace std {
@@ -228,7 +230,9 @@ enum ImageBindings
 {
     OUTPUT_IMAGE_BINDING = 0,
     RANDOM_STATE_IMAGE_BINDING = 1,
-    ACCUM_IMAGE_BINDING = 2
+    ACCUM_IMAGE_BINDING = 2,
+    TINYMT_RANDOM_STATE_IMAGE_BINDING = 3,
+    TINYMT_RANDOM_MAT_IMAGE_BINDING = 4
 };
 
 int Application::run()
@@ -243,13 +247,25 @@ int Application::run()
 
     c2ba::GLUniform<c2ba::GLSLImage2Df> uOutputImage{ program, "uOutputImage" };
     uOutputImage.set(program, OUTPUT_IMAGE_BINDING);
+
     c2ba::GLUniform<c2ba::GLSLImage2Df> uRandomStateImage{ program, "uRandomStateImage" };
     uRandomStateImage.set(program, RANDOM_STATE_IMAGE_BINDING);
+
+    c2ba::GLUniform<c2ba::GLSLImage2Df> uTinyMTRandomStateImage{ program, "uTinyMTRandomStateImage" };
+    uTinyMTRandomStateImage.set(program, TINYMT_RANDOM_STATE_IMAGE_BINDING);
+
+    c2ba::GLUniform<c2ba::GLSLImage2Df> uTinyMTRandomMatImage{ program, "uTinyMTRandomMatImage" };
+    uTinyMTRandomMatImage.set(program, TINYMT_RANDOM_MAT_IMAGE_BINDING);
+
     c2ba::GLUniform<c2ba::GLSLImage2Df> uAccumImage{ program, "uAccumImage" };
     uAccumImage.set(program, ACCUM_IMAGE_BINDING);
+
     c2ba::GLUniform<GLuint> uIterationCount{ program, "uIterationCount" };
+
     c2ba::GLUniform<c2ba::GLfloat4x4> uRcpViewProjMatrix{ program, "uRcpViewProjMatrix" };
+
     c2ba::GLUniform<c2ba::GLfloat3> uCameraPosition{ program, "uCameraPosition" };
+
     c2ba::GLUniform<GLuint> uSphereCount{ program, "uSphereCount" };
 
     size_t framebufferWidth = m_nWindowWidth;
@@ -280,6 +296,30 @@ int Application::run()
             return randomState;
         });
         randomImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels.data());
+    }
+
+
+
+    c2ba::GLTexture2D tinymt32StateImage;
+    c2ba::GLTexture2D tinymt32MatImage;
+    tinymt32StateImage.setStorage(1, GL_RGBA32UI, framebufferWidth, framebufferHeight);
+    tinymt32StateImage.bindImage(TINYMT_RANDOM_STATE_IMAGE_BINDING, 0, GL_READ_WRITE, GL_RGBA32UI);
+    tinymt32MatImage.setStorage(1, GL_RGBA32UI, framebufferWidth, framebufferHeight);
+    tinymt32MatImage.bindImage(TINYMT_RANDOM_MAT_IMAGE_BINDING, 0, GL_READ_WRITE, GL_RGBA32UI);
+    {
+        std::vector<c2ba::uint4> states(framebufferWidth * framebufferHeight);
+        std::vector<c2ba::uint4> mats(framebufferWidth * framebufferHeight);
+
+        for (auto i = 0u; i < framebufferWidth * framebufferHeight; ++i) {
+            auto seed = 0;// rng.getUInt();
+            tinymt32_t random;
+            tinymt32_init(&random, seed);
+            states[i] = c2ba::uint4(random.status[0], random.status[1], random.status[2], random.status[3]);
+            mats[i] = c2ba::uint4(random.mat1, random.mat2, random.tmat, 0);
+        }
+
+        tinymt32StateImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, states.data());
+        tinymt32MatImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, mats.data());
     }
 
     c2ba::GLTexture2D accumImage;
@@ -328,7 +368,7 @@ int Application::run()
         glBlitFramebuffer(
             0, 0, GLint(framebufferWidth), GLint(framebufferHeight),
             0, 0, GLint(m_nWindowWidth), GLint(m_nWindowHeight),
-            GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 

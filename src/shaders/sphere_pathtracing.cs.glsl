@@ -76,7 +76,20 @@ uint LCGStep(uint z, uint A, uint C)
     return (A * z + C);    
 }
 
-float stateToFloat(inout uvec4 state) {
+uvec4 loadTausLCGRandState(ivec2 pixelCoords)
+{
+    return imageLoad(uRandomStateImage, pixelCoords);
+}
+
+void storeTausLCGRandState(ivec2 pixelCoords, uvec4 state)
+{
+    imageStore(uRandomStateImage, pixelCoords, state);
+}
+
+// Hybrid Generator described in  http://http.developer.nvidia.com/GPUGems3/gpugems3_ch37.html
+// More details here: http://math.stackexchange.com/questions/337782/pseudo-random-number-generation-on-the-gpu
+float TausLCGRand(inout uvec4 state)
+{
     state.x = TausStep(state.x, 13, 19, 12, 4294967294);
     state.y = TausStep(state.y, 2, 25, 4, 4294967288);
     state.z = TausStep(state.z, 3, 11, 17, 4294967280);
@@ -85,27 +98,224 @@ float stateToFloat(inout uvec4 state) {
     return 2.3283064365387e-10 * float(state.x ^ state.y ^ state.z ^ state.w);
 }
 
-// Hybrid Generator described in  http://http.developer.nvidia.com/GPUGems3/gpugems3_ch37.html
-// More details here: http://math.stackexchange.com/questions/337782/pseudo-random-number-generation-on-the-gpu
-float getRandFloat(ivec2 pixelCoords) {
-    uvec4 state = imageLoad(uRandomStateImage, pixelCoords);
-    float result = stateToFloat(state);
-    imageStore(uRandomStateImage, pixelCoords, state);
-
-    return result;
+vec2 TausLCGRand2(inout uvec4 state)
+{
+    return vec2(TausLCGRand(state), TausLCGRand(state));
 }
 
-vec2 getRandFloat2(ivec2 pixelCoords) {
-    uvec4 state = imageLoad(uRandomStateImage, pixelCoords);
-    vec2 result;
-    result.x = stateToFloat(state);
-    result.y = stateToFloat(state);
-    imageStore(uRandomStateImage, pixelCoords, state);
-    return result;
+// Source for tinyMT: https://github.com/MersenneTwister-Lab/TinyMT
+layout(rgba32ui) uniform uimage2D uTinyMTRandomStateImage;
+layout(rgba32ui) uniform uimage2D uTinyMTRandomMatImage;
+
+#define TINYMT32_MEXP 127
+#define TINYMT32_SH0 1
+#define TINYMT32_SH1 10
+#define TINYMT32_SH8 8
+#define TINYMT32_MASK uint(0x7fffffff)
+#define TINYMT32_MUL (1.0f / 16777216.0f)
+
+/**
+* tinymt32 internal state vector and parameters
+*/
+struct tinymt32_t
+{
+    uvec4 status;
+    uint mat1;
+    uint mat2;
+    uint tmat;
+};
+
+tinymt32_t tinymt32_load_state(ivec2 pixelCoords)
+{
+    tinymt32_t random;
+    random.status = imageLoad(uTinyMTRandomStateImage, pixelCoords);
+    uvec4 mat = imageLoad(uTinyMTRandomMatImage, pixelCoords);
+    random.mat1 = mat.x;
+    random.mat2 = mat.y;
+    random.tmat = mat.z;
+    return random;
+}
+
+void tinymt32_store_state(ivec2 pixelCoords, tinymt32_t random)
+{
+    imageStore(uTinyMTRandomStateImage, pixelCoords, random.status);
+    uvec4 tmp = uvec4(random.mat1, random.mat2, random.tmat, 0);
+    imageStore(uTinyMTRandomMatImage, pixelCoords, tmp);
+}
+
+/**
+* This function changes internal state of tinymt32.
+* Users should not call this function directly.
+* @param random tinymt internal status
+*/
+void tinymt32_next_state(inout tinymt32_t random) {
+    uint y = random.status[3];
+    uint x = (random.status[0] & TINYMT32_MASK)
+        ^ random.status[1]
+        ^ random.status[2];
+    x ^= (x << TINYMT32_SH0);
+    y ^= (y >> TINYMT32_SH0) ^ x;
+    random.status[0] = random.status[1];
+    random.status[1] = random.status[2];
+    random.status[2] = x ^ (y << TINYMT32_SH1);
+    random.status[3] = y;
+    random.status[1] ^= -(int(y & 1)) & random.mat1;
+    random.status[2] ^= -(int(y & 1)) & random.mat2;
+}
+
+/**
+* This function outputs 32-bit unsigned integer from internal state.
+* Users should not call this function directly.
+* @param random tinymt internal status
+* @return 32-bit unsigned pseudorandom number
+*/
+uint tinymt32_temper(tinymt32_t random) 
+{
+    uint t0, t1;
+    t0 = random.status[3];
+#if defined(LINEARITY_CHECK)
+    t1 = random->status[0]
+        ^ (random->status[2] >> TINYMT32_SH8);
+#else
+    t1 = random.status[0]
+        + (random.status[2] >> TINYMT32_SH8);
+#endif
+    t0 ^= t1;
+    t0 ^= -(int(t1 & 1)) & random.tmat;
+    return t0;
+}
+
+/**
+* This function outputs floating point number from internal state.
+* Users should not call this function directly.
+* @param random tinymt internal status
+* @return floating point number r (1.0 <= r < 2.0)
+*/
+float tinymt32_temper_conv(tinymt32_t random) {
+    uint t0, t1;
+    uint u;
+
+    t0 = random.status[3];
+#if defined(LINEARITY_CHECK)
+    t1 = random.status[0]
+        ^ (random.status[2] >> TINYMT32_SH8);
+#else
+    t1 = random.status[0]
+        + (random.status[2] >> TINYMT32_SH8);
+#endif
+    t0 ^= t1;
+    u = ((t0 ^ (-(int(t1 & 1)) & random.tmat)) >> 9)
+        | uint(0x3f800000);
+    return uintBitsToFloat(u);
+}
+
+/**
+* This function outputs floating point number from internal state.
+* Users should not call this function directly.
+* @param random tinymt internal status
+* @return floating point number r (1.0 < r < 2.0)
+*/
+float tinymt32_temper_conv_open(tinymt32_t random) {
+    uint t0, t1;
+    uint u;
+
+    t0 = random.status[3];
+#if defined(LINEARITY_CHECK)
+    t1 = random.status[0]
+        ^ (random.status[2] >> TINYMT32_SH8);
+#else
+    t1 = random.status[0]
+        + (random.status[2] >> TINYMT32_SH8);
+#endif
+    t0 ^= t1;
+    u = ((t0 ^ (-(int(t1 & 1)) & random.tmat)) >> 9)
+        | uint(0x3f800001);
+    return uintBitsToFloat(u);
+}
+
+/**
+* This function outputs 32-bit unsigned integer from internal state.
+* @param random tinymt internal status
+* @return 32-bit unsigned integer r (0 <= r < 2^32)
+*/
+uint tinymt32_generate_uint32(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return tinymt32_temper(random);
+}
+
+/**
+* This function outputs floating point number from internal state.
+* This function is implemented using multiplying by (1 / 2^24).
+* floating point multiplication is faster than using union trick in
+* my Intel CPU.
+* @param random tinymt internal status
+* @return floating point number r (0.0 <= r < 1.0)
+*/
+float tinymt32_generate_float(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return (tinymt32_temper(random) >> 8) * TINYMT32_MUL;
+}
+
+/**
+* This function outputs floating point number from internal state.
+* This function is implemented using union trick.
+* @param random tinymt internal status
+* @return floating point number r (1.0 <= r < 2.0)
+*/
+float tinymt32_generate_float12(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return tinymt32_temper_conv(random);
+}
+
+/**
+* This function outputs floating point number from internal state.
+* This function is implemented using union trick.
+* @param random tinymt internal status
+* @return floating point number r (0.0 <= r < 1.0)
+*/
+float tinymt32_generate_float01(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return tinymt32_temper_conv(random) - 1.0f;
+}
+
+/**
+* This function outputs floating point number from internal state.
+* This function may return 1.0 and never returns 0.0.
+* @param random tinymt internal status
+* @return floating point number r (0.0 < r <= 1.0)
+*/
+float tinymt32_generate_floatOC(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return 1.0f - tinymt32_generate_float(random);
+}
+
+/**
+* This function outputs floating point number from internal state.
+* This function returns neither 0.0 nor 1.0.
+* @param random tinymt internal status
+* @return floating point number r (0.0 < r < 1.0)
+*/
+float tinymt32_generate_floatOO(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return tinymt32_temper_conv_open(random) - 1.0f;
+}
+
+/**
+* This function outputs double precision floating point number from
+* internal state. The returned value has 32-bit precision.
+* In other words, this function makes one double precision floating point
+* number from one 32-bit unsigned integer.
+* @param random tinymt internal status
+* @return floating point number r (0.0 < r <= 1.0)
+*/
+double tinymt32_generate_32double(inout tinymt32_t random) {
+    tinymt32_next_state(random);
+    return double(tinymt32_temper(random)) * (1.0 / 4294967296.0);
 }
 
 // zAxis should be normalized
-mat3 frameZ(vec3 zAxis) {
+mat3 frameZ(vec3 zAxis) 
+{
     mat3 matrix;
 
     matrix[2] = zAxis;
@@ -159,7 +369,7 @@ float intersectSphere(vec3 org, vec3 dir, Sphere sphere, out vec3 position, out 
     float sqrtDiscriminant = sqrt(discriminant);
     float t1 = 0.5 * (-b - sqrtDiscriminant) / a;
     float t2 = 0.5 * (-b + sqrtDiscriminant) / a;
-    float t = t1 >= 0.f ? t1 : t2;
+    float t = (t1 >= 0.f) ? t1 : t2;
 
     position = org + t * dir;
     normal = normalize(position - sphere.center);
@@ -181,7 +391,7 @@ float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal) {
     return currentDist;
 }
 
-vec3 ambientOcclusion(vec3 org, vec3 dir, ivec2 pixelCoords) {
+vec3 ambientOcclusion(vec3 org, vec3 dir, inout tinymt32_t random) {
     vec3 position, normal;
     vec3 color = vec3(0);
     float dist = intersectScene(org, dir, position, normal);
@@ -190,7 +400,7 @@ vec3 ambientOcclusion(vec3 org, vec3 dir, ivec2 pixelCoords) {
 
         mat3 localToWorld = frameZ(normal);
         org = org + dist * dir;
-        vec2 uv = getRandFloat2(pixelCoords);
+        vec2 uv = vec2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
         float jacobian;
         vec3 dir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
         float cosTheta = dir.z;
@@ -203,7 +413,7 @@ vec3 ambientOcclusion(vec3 org, vec3 dir, ivec2 pixelCoords) {
     return vec3(0.);
 }
 
-vec3 normal(vec3 org, vec3 dir, ivec2 pixelCoords) {
+vec3 normal(vec3 org, vec3 dir) {
     vec3 position, normal;
     vec3 color = vec3(0);
     float dist = intersectScene(org, dir, position, normal);
@@ -221,9 +431,11 @@ void main() {
         return;
     }
 
+    tinymt32_t random = tinymt32_load_state(pixelCoords);
+
     vec4 currentEstimate = imageLoad(uAccumImage, pixelCoords);
 
-    vec2 pixelSample = getRandFloat2(pixelCoords);
+    vec2 pixelSample = vec2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
     float pixelSampleJacobian;
     vec2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
 
@@ -237,11 +449,14 @@ void main() {
     vec3 dir = normalize(viewCoords.xyz - uCameraPosition);
     vec3 org = uCameraPosition;
 
-    vec3 color = ambientOcclusion(org, dir, pixelCoords);
+    vec3 color = normal(org, dir);
+    //vec3 color = ambientOcclusion(org, dir, random);
     //vec3 color = vec3(getRandFloat(pixelCoords));
     
     vec4 newEstimate = currentEstimate + vec4(color, 1);
 
     imageStore(uOutputImage, pixelCoords, vec4(newEstimate.xyz / newEstimate.w, 0));
     imageStore(uAccumImage, pixelCoords, newEstimate);
+
+    tinymt32_store_state(pixelCoords, random);
 }
