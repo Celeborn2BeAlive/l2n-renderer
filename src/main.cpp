@@ -20,6 +20,8 @@
 
 #include <filesystem>
 #include <unordered_map>
+#include <thread>
+#include <atomic>
 
 #include "shaders.hpp"
 #include "ViewController.hpp"
@@ -235,12 +237,182 @@ enum ImageBindings
     TINYMT_RANDOM_MAT_IMAGE_BINDING = 4
 };
 
+struct CPUSpherePathtracing
+{
+    c2ba::float4x4 uRcpViewProjMatrix;
+    c2ba::float3 uCameraPosition;
+    const Sphere* sphereArray;
+    size_t uSphereCount;
+
+    // zAxis should be normalized
+    c2ba::float3x3 frameZ(c2ba::float3 zAxis)
+    {
+        c2ba::float3x3 matrix;
+
+        matrix[2] = zAxis;
+        if (abs(zAxis.y) > abs(zAxis.x)) {
+            float rcpLength = 1.f / length(c2ba::float2(zAxis.x, zAxis.y));
+            matrix[0] = rcpLength * c2ba::float3(zAxis.y, -zAxis.x, 0.f);
+        }
+        else {
+            float rcpLength = 1.f / length(c2ba::float2(zAxis.x, zAxis.z));
+            matrix[0] = rcpLength * c2ba::float3(zAxis.z, 0.f, -zAxis.x);
+        }
+        matrix[1] = cross(zAxis, matrix[0]);
+        return matrix;
+    }
+
+    c2ba::float3 uniformSampleHemisphere(float u1, float u2, float& jacobian)
+    {
+        float r = sqrt(1.f - u1 * u1);
+        float phi = 2.f * c2ba::pi<float>() * u2;
+        jacobian = 2.f * c2ba::pi<float>();
+        return c2ba::float3(cos(phi) * r, sin(phi) * r, u1);
+    }
+
+    c2ba::float3 cosineSampleHemisphere(float u1, float u2, float& jacobian)
+    {
+        float r = sqrt(u1);
+        float phi = 2.f * c2ba::pi<float>() * u2;
+        float cosTheta = sqrt(c2ba::max(0.f, 1.f - u1));
+        const float x = r * cos(phi);
+        const float y = r * sin(phi);
+        jacobian = cosTheta > 0.0 ? c2ba::pi<float>() / cosTheta : cosTheta;
+        return c2ba::float3(x, y, cosTheta);
+    }
+
+    c2ba::float2 uniformSampleDisk(float radius, float u1, float u2, float& jacobian) {
+        float r = sqrt(u1);
+        float theta = 2 * c2ba::pi<float>() * u2;
+        jacobian = c2ba::pi<float>() * r * r;
+        return radius * r * c2ba::float2(cos(theta), sin(theta));
+    }
+
+    float intersectSphere(c2ba::float3 org, c2ba::float3 dir, Sphere sphere, c2ba::float3& position, c2ba::float3& normal) {
+        c2ba::float3 centerOrg = org - sphere.center;
+        float a = 1;
+        float b = 2 * dot(centerOrg, dir);
+        float c = dot(centerOrg, centerOrg) - sphere.sqrRadius;
+        float discriminant = b * b - 4 * a * c;
+        if (discriminant < 0.) {
+            return -1.;
+        }
+        float sqrtDiscriminant = sqrt(discriminant);
+        float t1 = 0.5f * (-b - sqrtDiscriminant);
+        float t2 = 0.5f * (-b + sqrtDiscriminant);
+        float t = (t1 >= 0.f) ? t1 : t2;
+
+        position = org + t * dir;
+        normal = normalize(position - sphere.center);
+
+        return t;
+    }
+
+    float intersectScene(c2ba::float3 org, c2ba::float3 dir, c2ba::float3& position, c2ba::float3& normal) {
+        float currentDist = -1;
+        for (auto i = 0; i < uSphereCount; ++i) {
+            c2ba::float3 tmpPos, tmpNormal;
+            float t = intersectSphere(org, dir, sphereArray[i], tmpPos, tmpNormal);
+            if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
+                currentDist = t;
+                position = tmpPos;
+                normal = tmpNormal;
+            }
+        }
+        return currentDist;
+    }
+
+    c2ba::float3 ambientOcclusion(c2ba::float3 org, c2ba::float3 dir, tinymt32_t* random) {
+        c2ba::float3 position, normal;
+        c2ba::float3 color = c2ba::float3(0);
+        float dist = intersectScene(org, dir, position, normal);
+        if (dist >= 0.) {
+            //color = normal;
+
+            c2ba::float3x3 localToWorld = frameZ(normal);
+            org = org + dist * dir;
+            c2ba::float2 uv = c2ba::float2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
+            float jacobian;
+            c2ba::float3 dir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
+            float cosTheta = dir.z;
+            dir = localToWorld * dir;
+            dist = intersectScene(org + 0.01f * dir, dir, position, normal);
+            if (dist < 0.) {
+                return c2ba::float3(/*jacobian * cosTheta / c2ba::pi<float>()*/1); // Works thanks to importance sampling
+            }
+        }
+        return c2ba::float3(0.);
+    }
+
+    c2ba::float3 normal(c2ba::float3 org, c2ba::float3 dir) {
+        c2ba::float3 position, normal;
+        c2ba::float3 color = c2ba::float3(0);
+        float dist = intersectScene(org, dir, position, normal);
+        if (dist >= 0.) {
+            return normal;
+        }
+        return c2ba::float3(0);
+    }
+
+    void render(
+        c2ba::float4* finalImage, c2ba::float4* accumImage, size_t imageWidth, size_t imageHeight, tinymt32_t* randoms)
+    {
+        const auto threadCount = std::thread::hardware_concurrency();
+        const auto pixelCount = imageWidth * imageHeight;
+        std::atomic_size_t nextPixelIndex{ 0 };
+
+        auto taskFunctor = [&]()
+        {
+            size_t pixelIndex;
+            while (pixelCount > (pixelIndex = nextPixelIndex++)) {
+                auto randFloat = tinymt32_generate_floatOO(randoms + pixelIndex);
+
+                tinymt32_t* random = randoms + pixelIndex;
+
+                c2ba::int2 pixelCoords(pixelIndex % imageWidth, pixelIndex / imageWidth);
+
+                c2ba::float2 pixelSample = c2ba::float2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
+                float pixelSampleJacobian;
+                c2ba::float2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
+
+                c2ba::float2 rasterCoords = c2ba::float2(pixelCoords) + c2ba::float2(0.5) + diskSample;
+                c2ba::float2 sampleCoords = rasterCoords / c2ba::float2(imageWidth, imageHeight);
+
+                c2ba::float4 ndCoords = c2ba::float4(-1, -1, -1, 1) + c2ba::float4(2.f * sampleCoords, 0, 0); // Normalized device coordinates
+                c2ba::float4 viewCoords = uRcpViewProjMatrix * ndCoords;
+                viewCoords /= viewCoords.w;
+
+                c2ba::float3 dir = normalize(c2ba::float3(viewCoords) - uCameraPosition);
+                c2ba::float3 org = uCameraPosition;
+
+                c2ba::float3 color = normal(org, dir);
+                //c2ba::float3 color = ambientOcclusion(org, dir, random);
+                //vec3 color = vec3(getRandFloat(pixelCoords));
+
+                accumImage[pixelIndex] += c2ba::float4(color, 1.f);
+
+                finalImage[pixelIndex] = accumImage[pixelIndex] / accumImage[pixelIndex].w;
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (auto i = 0u; i < threadCount; ++i) {
+            threads.emplace_back(taskFunctor);
+        }
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+    }
+};
+
 int Application::run()
 {
     c2ba::RandomGenerator rng;
 
     auto worldSize = 256.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
+    viewController.setViewMatrix(c2ba::transpose(c2ba::float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
 
     auto program = compileProgram(m_ShaderLibrary, { m_ShadersRootPath / "sphere_pathtracing.cs.glsl" });
     program.use();
@@ -298,8 +470,7 @@ int Application::run()
         randomImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels.data());
     }
 
-
-
+    std::vector<tinymt32_t> randoms;
     c2ba::GLTexture2D tinymt32StateImage;
     c2ba::GLTexture2D tinymt32MatImage;
     tinymt32StateImage.setStorage(1, GL_RGBA32UI, framebufferWidth, framebufferHeight);
@@ -311,11 +482,12 @@ int Application::run()
         std::vector<c2ba::uint4> mats(framebufferWidth * framebufferHeight);
 
         for (auto i = 0u; i < framebufferWidth * framebufferHeight; ++i) {
-            auto seed = 0;// rng.getUInt();
+            auto seed = rng.getUInt();
             tinymt32_t random;
             tinymt32_init(&random, seed);
             states[i] = c2ba::uint4(random.status[0], random.status[1], random.status[2], random.status[3]);
             mats[i] = c2ba::uint4(random.mat1, random.mat2, random.tmat, 0);
+            randoms.emplace_back(random);
         }
 
         tinymt32StateImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, states.data());
@@ -327,10 +499,13 @@ int Application::run()
     accumImage.bindImage(ACCUM_IMAGE_BINDING, 0, GL_READ_WRITE, GL_RGBA32F);
     accumImage.clear(0, GL_RGBA, GL_FLOAT, c2ba::value_ptr(c2ba::float4(0)));
     
+    std::vector<c2ba::float4> cpuAccumImage(framebufferWidth * framebufferHeight, c2ba::float4(0));
+    std::vector<c2ba::float4> cpuFinalImage(framebufferWidth * framebufferHeight, c2ba::float4(0));
+
     // Draw on screen
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
-    auto sphereCount = 1024;
+    auto sphereCount = 128;
     auto computeSpheres = [&]() {
         std::vector<Sphere> spheres;
         for (auto i = 0; i < sphereCount; ++i) {
@@ -345,20 +520,32 @@ int Application::run()
     // #todo improve buffer interface to be able to pass a memory layout instead of a single type
     // Something like GLBuffer<GLBufferLayout<GLuint, Sphere[]>> myBuffer;
     // Only one unspecified sized array allows, at the end of the type list
-    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, computeSpheres().data(), 0);
+    auto sphereVector = computeSpheres();
+    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, sphereVector.data(), 0);
     sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
+
+    CPUSpherePathtracing spherePathracing;
+    spherePathracing.sphereArray = sphereVector.data();
+    spherePathracing.uSphereCount = sphereVector.size();
 
     /* Loop until the user closes the window */
     for (auto iterationCount = 0; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
         auto seconds = glfwGetTime();
 
-        uIterationCount.set(iterationCount);
+        /*uIterationCount.set(iterationCount);
         auto rcpViewProjMatrix = c2ba::inverse(projMatrix * viewController.getViewMatrix());
         uRcpViewProjMatrix.set(c2ba::value_ptr(rcpViewProjMatrix));
         uCameraPosition.set(c2ba::value_ptr(viewController.getRcpViewMatrix()[3]));
         uSphereCount.set(GLuint(sphereBuffer.size()));
 
-        glDispatchCompute(numGroupX, numGroupY, 1);
+        glDispatchCompute(numGroupX, numGroupY, 1);*/
+
+
+        spherePathracing.uCameraPosition = c2ba::float3(viewController.getRcpViewMatrix()[3]);
+        spherePathracing.uRcpViewProjMatrix = c2ba::inverse(projMatrix * viewController.getViewMatrix());
+
+        spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, randoms.data());
+        framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
 
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -381,7 +568,10 @@ int Application::run()
         auto ellapsedTime = glfwGetTime() - seconds;
         if (viewController.update(float(ellapsedTime))) {
             accumImage.clear(0, GL_RGBA, GL_FLOAT, c2ba::value_ptr(c2ba::float4(0)));
+            std::fill(begin(cpuAccumImage), end(cpuAccumImage), c2ba::float4(0));
         }
+
+        //std::cerr << viewController.getViewMatrix() << std::endl;
     }
 
     return 0;

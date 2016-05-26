@@ -449,8 +449,8 @@ void main() {
     vec3 dir = normalize(viewCoords.xyz - uCameraPosition);
     vec3 org = uCameraPosition;
 
-    vec3 color = normal(org, dir);
-    //vec3 color = ambientOcclusion(org, dir, random);
+    //vec3 color = normal(org, dir);
+    vec3 color = ambientOcclusion(org, dir, random);
     //vec3 color = vec3(getRandFloat(pixelCoords));
     
     vec4 newEstimate = currentEstimate + vec4(color, 1);
