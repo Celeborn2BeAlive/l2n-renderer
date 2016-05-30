@@ -239,6 +239,43 @@ enum ImageBindings
 
 struct CPUSpherePathtracing
 {
+    struct Random
+    {
+        tinymt32_t random;
+    };
+
+    static void setSeed(Random& random, uint32_t seed)
+    {
+        tinymt32_init(&random.random, seed);
+    }
+
+    static float randFloat(Random& random)
+    {
+        return tinymt32_generate_floatOO(&random.random);
+    }
+
+    //struct Random
+    //{
+    //    c2ba::RandomGenerator rng;
+    //};
+
+    //static void setSeed(Random& random, uint32_t seed)
+    //{
+    //    random.rng.setSeed(seed);
+    //}
+
+    //static float randFloat(Random& random)
+    //{
+    //    return random.rng.getFloat();
+    //}
+
+    struct State
+    {
+        std::vector<Random> randoms;
+        size_t iteration;
+    };
+
+    c2ba::float4x4 uRcpViewMatrix;
     c2ba::float4x4 uRcpViewProjMatrix;
     c2ba::float3 uCameraPosition;
     const Sphere* sphereArray;
@@ -293,7 +330,7 @@ struct CPUSpherePathtracing
         float a = 1;
         float b = 2 * dot(centerOrg, dir);
         float c = dot(centerOrg, centerOrg) - sphere.sqrRadius;
-        float discriminant = b * b - 4 * a * c;
+        float discriminant = b * b - 4 * c;
         if (discriminant < 0.) {
             return -1.;
         }
@@ -322,7 +359,7 @@ struct CPUSpherePathtracing
         return currentDist;
     }
 
-    c2ba::float3 ambientOcclusion(c2ba::float3 org, c2ba::float3 dir, tinymt32_t* random) {
+    c2ba::float3 ambientOcclusion(c2ba::float3 org, c2ba::float3 dir, Random& random) {
         c2ba::float3 position, normal;
         c2ba::float3 color = c2ba::float3(0);
         float dist = intersectScene(org, dir, position, normal);
@@ -331,7 +368,7 @@ struct CPUSpherePathtracing
 
             c2ba::float3x3 localToWorld = frameZ(normal);
             org = org + dist * dir;
-            c2ba::float2 uv = c2ba::float2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
+            c2ba::float2 uv = c2ba::float2(randFloat(random), randFloat(random));
             float jacobian;
             c2ba::float3 dir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
             float cosTheta = dir.z;
@@ -344,6 +381,16 @@ struct CPUSpherePathtracing
         return c2ba::float3(0.);
     }
 
+    c2ba::float3 hit(c2ba::float3 org, c2ba::float3 dir) {
+        c2ba::float3 position, normal;
+        c2ba::float3 color = c2ba::float3(0);
+        float dist = intersectScene(org, dir, position, normal);
+        if (dist >= 0.) {
+            return c2ba::float3(1);
+        }
+        return c2ba::float3(0);
+    }
+
     c2ba::float3 normal(c2ba::float3 org, c2ba::float3 dir) {
         c2ba::float3 position, normal;
         c2ba::float3 color = c2ba::float3(0);
@@ -354,28 +401,41 @@ struct CPUSpherePathtracing
         return c2ba::float3(0);
     }
 
-    void render(
-        c2ba::float4* finalImage, c2ba::float4* accumImage, size_t imageWidth, size_t imageHeight, tinymt32_t* randoms)
+    void renderPixels(
+        c2ba::float4* finalImage, c2ba::float4* accumImage, size_t imageWidth, size_t imageHeight, State& state)
     {
-        const auto threadCount = std::thread::hardware_concurrency();
         const auto pixelCount = imageWidth * imageHeight;
+
+        if (state.randoms.size() != pixelCount) {
+            c2ba::RandomGenerator rng;
+            std::vector<Random> randomsVector(pixelCount);
+            for (auto i = 0u; i < pixelCount; ++i) {
+                auto seed = rng.getUInt();
+                setSeed(randomsVector[i], seed);
+            }
+            std::swap(randomsVector, state.randoms);
+
+            state.iteration = 0;
+        }
+        
+        auto* randoms = state.randoms.data();
+
+        const auto threadCount = std::thread::hardware_concurrency();
         std::atomic_size_t nextPixelIndex{ 0 };
 
         auto taskFunctor = [&]()
         {
             size_t pixelIndex;
             while (pixelCount > (pixelIndex = nextPixelIndex++)) {
-                auto randFloat = tinymt32_generate_floatOO(randoms + pixelIndex);
-
-                tinymt32_t* random = randoms + pixelIndex;
+                auto* random = randoms + pixelIndex;
 
                 c2ba::int2 pixelCoords(pixelIndex % imageWidth, pixelIndex / imageWidth);
 
-                c2ba::float2 pixelSample = c2ba::float2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
-                float pixelSampleJacobian;
-                c2ba::float2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
+                c2ba::float2 pixelSample = c2ba::float2(randFloat(*random), randFloat(*random));
+                //float pixelSampleJacobian;
+                //c2ba::float2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
 
-                c2ba::float2 rasterCoords = c2ba::float2(pixelCoords) + c2ba::float2(0.5) + diskSample;
+                c2ba::float2 rasterCoords = c2ba::float2(pixelCoords) + pixelSample;
                 c2ba::float2 sampleCoords = rasterCoords / c2ba::float2(imageWidth, imageHeight);
 
                 c2ba::float4 ndCoords = c2ba::float4(-1, -1, -1, 1) + c2ba::float4(2.f * sampleCoords, 0, 0); // Normalized device coordinates
@@ -403,6 +463,100 @@ struct CPUSpherePathtracing
         for (auto& thread : threads) {
             thread.join();
         }
+
+        ++state.iteration;
+    }
+
+    void renderTiles(
+        c2ba::float4* finalImage, c2ba::float4* accumImage, size_t imageWidth, size_t imageHeight, State& state)
+    {
+        const auto tileSize = 32;
+        const auto tileCountX = imageWidth / tileSize + ((imageWidth % tileSize > 0) ? 1 : 0);
+        const auto tileCountY = imageHeight / tileSize + ((imageHeight % tileSize > 0) ? 1 : 0);
+        const auto tileCount = tileCountX * tileCountY;
+
+        if (state.randoms.size() != tileCount) {
+            c2ba::RandomGenerator rng;
+            std::vector<Random> randomsVector(tileCount);
+            for (auto i = 0u; i < tileCount; ++i) {
+                auto seed = rng.getUInt();
+                setSeed(randomsVector[i], seed);
+            }
+            std::swap(randomsVector, state.randoms);
+
+            state.iteration = 0;
+        }
+
+        auto* randoms = state.randoms.data();
+
+        const auto threadCount = std::thread::hardware_concurrency();
+        const auto pixelCount = imageWidth * imageHeight;
+        std::atomic_size_t nextTileIndex{ 0 };
+
+        const auto jitterSize = 2;
+        const auto jitterLength = 0.5f / jitterSize;
+
+        auto taskFunctor = [&]()
+        {
+            size_t tileIndex;
+            while (tileCount > (tileIndex = nextTileIndex++)) {
+                const auto tileX = tileIndex % tileCountX;
+                const auto tileY = tileIndex / tileCountX;
+
+                auto* const random = randoms + tileIndex;
+
+                for (auto pixelY = tileY * tileSize, endY = c2ba::min(pixelY + tileSize, imageHeight); pixelY < endY; ++pixelY) {
+                    for (auto pixelX = tileX * tileSize, endX = c2ba::min(pixelX + tileSize, imageWidth); pixelX < endX; ++pixelX) {
+                        const auto pixelIndex = pixelX + pixelY * imageWidth;
+
+                        const c2ba::int2 pixelCoords(pixelIndex % imageWidth, pixelIndex / imageWidth);
+
+                        const auto jitterX = state.iteration % jitterSize;
+                        const auto jitterY = state.iteration / jitterSize;
+
+                        const  c2ba::float2 pixelSample = jitterLength * c2ba::float2(jitterX, jitterY);//c2ba::float2(randFloat(*random), randFloat(*random));
+                        //float pixelSampleJacobian;
+                        //c2ba::float2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
+
+                        const c2ba::float2 rasterCoords = c2ba::float2(pixelCoords) + pixelSample;
+                        const c2ba::float2 sampleCoords = rasterCoords / c2ba::float2(imageWidth, imageHeight);
+
+                        const c2ba::float4 ndCoords = c2ba::float4(-1, -1, -1, 1) + c2ba::float4(2.f * sampleCoords, 0, 0); // Normalized device coordinates
+                        c2ba::float4 viewCoords = uRcpViewProjMatrix * ndCoords;
+                        viewCoords /= viewCoords.w;
+
+                        const c2ba::float3 dir = normalize(c2ba::float3(viewCoords) - uCameraPosition);
+                        const c2ba::float3 org = uCameraPosition;
+
+                        const c2ba::float3 color = hit(org, dir);
+                        //const c2ba::float3 color = normal(org, dir);
+                        //c2ba::float3 color = ambientOcclusion(org, dir, random);
+                        //vec3 color = vec3(getRandFloat(pixelCoords));
+
+                        accumImage[pixelIndex] += c2ba::float4(color, 1.f);
+
+                        finalImage[pixelIndex] = accumImage[pixelIndex] / accumImage[pixelIndex].w;
+                    }
+                }
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (auto i = 0u; i < threadCount; ++i) {
+            threads.emplace_back(taskFunctor);
+        }
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        ++state.iteration;
+    }
+
+    void render(
+        c2ba::float4* finalImage, c2ba::float4* accumImage, size_t imageWidth, size_t imageHeight, State& state)
+    {
+        return renderTiles(finalImage, accumImage, imageWidth, imageHeight, state);
     }
 };
 
@@ -470,7 +624,6 @@ int Application::run()
         randomImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, pixels.data());
     }
 
-    std::vector<tinymt32_t> randoms;
     c2ba::GLTexture2D tinymt32StateImage;
     c2ba::GLTexture2D tinymt32MatImage;
     tinymt32StateImage.setStorage(1, GL_RGBA32UI, framebufferWidth, framebufferHeight);
@@ -487,7 +640,6 @@ int Application::run()
             tinymt32_init(&random, seed);
             states[i] = c2ba::uint4(random.status[0], random.status[1], random.status[2], random.status[3]);
             mats[i] = c2ba::uint4(random.mat1, random.mat2, random.tmat, 0);
-            randoms.emplace_back(random);
         }
 
         tinymt32StateImage.setSubImage(0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, states.data());
@@ -525,6 +677,7 @@ int Application::run()
     sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
 
     CPUSpherePathtracing spherePathracing;
+    CPUSpherePathtracing::State pathtracingState;
     spherePathracing.sphereArray = sphereVector.data();
     spherePathracing.uSphereCount = sphereVector.size();
 
@@ -544,7 +697,7 @@ int Application::run()
         spherePathracing.uCameraPosition = c2ba::float3(viewController.getRcpViewMatrix()[3]);
         spherePathracing.uRcpViewProjMatrix = c2ba::inverse(projMatrix * viewController.getViewMatrix());
 
-        spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, randoms.data());
+        spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, pathtracingState);
         framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
 
         glClear(GL_COLOR_BUFFER_BIT);
