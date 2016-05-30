@@ -276,6 +276,7 @@ struct CPUSpherePathtracing
     };
 
     c2ba::float4x4 uRcpViewMatrix;
+    c2ba::float4x4 uRcpProjMatrix;
     c2ba::float4x4 uRcpViewProjMatrix;
     c2ba::float3 uCameraPosition;
     const Sphere* sphereArray;
@@ -493,8 +494,8 @@ struct CPUSpherePathtracing
         const auto pixelCount = imageWidth * imageHeight;
         std::atomic_size_t nextTileIndex{ 0 };
 
-        const auto jitterSize = 2;
-        const auto jitterLength = 0.5f / jitterSize;
+        const auto jitterSize = 4;
+        const auto jitterLength = 1.f / jitterSize;
 
         auto taskFunctor = [&]()
         {
@@ -511,26 +512,29 @@ struct CPUSpherePathtracing
 
                         const c2ba::int2 pixelCoords(pixelIndex % imageWidth, pixelIndex / imageWidth);
 
-                        const auto jitterX = state.iteration % jitterSize;
-                        const auto jitterY = state.iteration / jitterSize;
+                        const auto jitterIndex = state.iteration % (jitterSize * jitterSize);
+                        const auto jitterX = jitterIndex % jitterSize;
+                        const auto jitterY = jitterIndex / jitterSize;
 
-                        const  c2ba::float2 pixelSample = jitterLength * c2ba::float2(jitterX, jitterY);//c2ba::float2(randFloat(*random), randFloat(*random));
+                        const c2ba::float2 jitterSample = c2ba::float2(0.5);
+                        const c2ba::float2 pixelSample = jitterLength * c2ba::float2(jitterX, jitterY) + jitterSample * jitterLength;//c2ba::float2(randFloat(*random), randFloat(*random));
                         //float pixelSampleJacobian;
                         //c2ba::float2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
 
                         const c2ba::float2 rasterCoords = c2ba::float2(pixelCoords) + pixelSample;
                         const c2ba::float2 sampleCoords = rasterCoords / c2ba::float2(imageWidth, imageHeight);
 
-                        const c2ba::float4 ndCoords = c2ba::float4(-1, -1, -1, 1) + c2ba::float4(2.f * sampleCoords, 0, 0); // Normalized device coordinates
+                        const c2ba::float4 ndCoords = c2ba::float4(-1, -1, 1, 1) + c2ba::float4(2.f * sampleCoords, 0, 0); // Normalized device coordinates on the far plane z=1 (seems to be more precise)
                         c2ba::float4 viewCoords = uRcpViewProjMatrix * ndCoords;
                         viewCoords /= viewCoords.w;
+                        //c2ba::float4 viewCoords = uRcpViewMatrix * c2ba::float4(ndCoords * c2ba::float4(1.f, imageHeight / float(imageWidth), 1.f, 1.f));
 
                         const c2ba::float3 dir = normalize(c2ba::float3(viewCoords) - uCameraPosition);
                         const c2ba::float3 org = uCameraPosition;
 
-                        const c2ba::float3 color = hit(org, dir);
+                        //const c2ba::float3 color = hit(org, dir);
                         //const c2ba::float3 color = normal(org, dir);
-                        //c2ba::float3 color = ambientOcclusion(org, dir, random);
+                        c2ba::float3 color = ambientOcclusion(org, dir, *random);
                         //vec3 color = vec3(getRandFloat(pixelCoords));
 
                         accumImage[pixelIndex] += c2ba::float4(color, 1.f);
@@ -567,6 +571,8 @@ int Application::run()
     auto worldSize = 256.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
     viewController.setViewMatrix(c2ba::transpose(c2ba::float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
+
+    //viewController.setViewMatrix(c2ba::transpose(c2ba::float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
 
     auto program = compileProgram(m_ShaderLibrary, { m_ShadersRootPath / "sphere_pathtracing.cs.glsl" });
     program.use();
@@ -673,32 +679,47 @@ int Application::run()
     // Something like GLBuffer<GLBufferLayout<GLuint, Sphere[]>> myBuffer;
     // Only one unspecified sized array allows, at the end of the type list
     auto sphereVector = computeSpheres();
-    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, sphereVector.data(), 0);
+    std::vector<c2ba::float4> tmpVector;
+    for (const auto& sphere : sphereVector) {
+        tmpVector.emplace_back(c2ba::float4(sphere.center, sphere.sqrRadius));
+        //tmpVector.emplace_back();
+    }
+    auto sphereBuffer = c2ba::genBufferStorage<c2ba::float4>(sphereCount, tmpVector.data(), 0);
     sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
 
     CPUSpherePathtracing spherePathracing;
     CPUSpherePathtracing::State pathtracingState;
     spherePathracing.sphereArray = sphereVector.data();
-    spherePathracing.uSphereCount = sphereVector.size();
+    spherePathracing.uSphereCount = sphereCount;
 
-    /* Loop until the user closes the window */
-    for (auto iterationCount = 0; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
-        auto seconds = glfwGetTime();
-
-        /*uIterationCount.set(iterationCount);
+    const auto gpuRender = [&](size_t iterationCount)
+    {
+        uIterationCount.set(iterationCount);
         auto rcpViewProjMatrix = c2ba::inverse(projMatrix * viewController.getViewMatrix());
         uRcpViewProjMatrix.set(c2ba::value_ptr(rcpViewProjMatrix));
         uCameraPosition.set(c2ba::value_ptr(viewController.getRcpViewMatrix()[3]));
-        uSphereCount.set(GLuint(sphereBuffer.size()));
+        uSphereCount.set(GLuint(sphereCount));
 
-        glDispatchCompute(numGroupX, numGroupY, 1);*/
+        glDispatchCompute(numGroupX, numGroupY, 1);
+    };
 
-
+    const auto cpuRender = [&](size_t iterationCount)
+    {
         spherePathracing.uCameraPosition = c2ba::float3(viewController.getRcpViewMatrix()[3]);
+        spherePathracing.uRcpViewMatrix = viewController.getRcpViewMatrix();
         spherePathracing.uRcpViewProjMatrix = c2ba::inverse(projMatrix * viewController.getViewMatrix());
+        spherePathracing.uRcpProjMatrix = c2ba::inverse(projMatrix);
 
         spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, pathtracingState);
         framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
+    };
+
+    /* Loop until the user closes the window */
+    for (auto iterationCount = 0u; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
+        auto seconds = glfwGetTime();
+
+            gpuRender(iterationCount);
+            //cpuRender(iterationCount);
 
         glClear(GL_COLOR_BUFFER_BIT);
 
