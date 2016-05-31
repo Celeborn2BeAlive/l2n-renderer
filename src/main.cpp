@@ -221,7 +221,7 @@ struct Sphere {
     c2ba::float3 center;
     float sqrRadius;
     uint32_t materialID;
-    c2ba::uint3 align0;
+    uint32_t padding[3];
 
     Sphere(const c2ba::float3& center, float radius) :
         center(center), sqrRadius(radius * radius), materialID(0) {
@@ -682,9 +682,9 @@ int Application::run()
     std::vector<c2ba::float4> tmpVector;
     for (const auto& sphere : sphereVector) {
         tmpVector.emplace_back(c2ba::float4(sphere.center, sphere.sqrRadius));
-        //tmpVector.emplace_back();
+        tmpVector.emplace_back();
     }
-    auto sphereBuffer = c2ba::genBufferStorage<c2ba::float4>(sphereCount, tmpVector.data(), 0);
+    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, sphereVector.data(), 0);
     sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
 
     CPUSpherePathtracing spherePathracing;

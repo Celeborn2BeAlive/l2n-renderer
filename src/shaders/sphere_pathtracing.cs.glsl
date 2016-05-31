@@ -13,7 +13,8 @@ struct PhongMaterial {
 struct Sphere {
     vec3 center;
     float sqrRadius;
-    //vec4 padding;
+    uint materialID;
+    uint padding[3];
 };
 
 struct PointLight {
@@ -345,7 +346,7 @@ vec3 cosineSampleHemisphere(float u1, float u2, out float jacobian)
     float cosTheta = sqrt(max(0.0, 1.0 - u1));
     const float x = r * cos(phi);
     const float y = r * sin(phi);
-    jacobian = cosTheta > 0.0 ? M_PI / cosTheta : cosTheta;
+    jacobian = cosTheta > 0.0 ? M_PI / cosTheta : 0.0;
     return vec3(x, y, cosTheta);
 }
 
@@ -410,7 +411,77 @@ float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal) {
     return currentDist;
 }
 
-vec3 ambientOcclusion(vec3 org, vec3 dir, inout tinymt32_t random) {
+float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal, out uint sphereIndex) {
+    float currentDist = -1;
+    for (uint i = 0; i < uSphereCount; ++i) {
+        vec3 tmpPos, tmpNormal;
+        float t = intersectSphere(org, dir, sphereArray[i], tmpPos, tmpNormal);
+        if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
+            currentDist = t;
+            position = tmpPos;
+            normal = tmpNormal;
+            sphereIndex = i;
+        }
+    }
+    return currentDist;
+}
+
+vec3 getColor(uint n) {
+    return fract(
+        sin(
+            float(n + 1) * vec3(12.9898, 78.233, 56.128)
+        )
+        * 43758.5453
+    );
+}
+
+float luminance(const vec3 color) {
+    return 0.212671 * color.r + 0.715160 * color.g + 0.072169 * color.b;
+}
+
+vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
+{
+    vec3 position, normal;
+    vec3 throughput = vec3(1);
+    vec3 color = vec3(0);
+    uint sphereIndex;
+    float dist = intersectScene(org, dir, position, normal, sphereIndex);
+    uint pathLength = 0;
+    while (dist >= 0.0) {
+        ++pathLength;
+        vec3 Kd = getColor(sphereIndex);
+
+        // One sphere on 16 is emissive
+        if (sphereIndex % 16 == 0) {
+            float emissionScale = pathLength > 1 ? 30.0 : 30.0;
+            color += throughput * emissionScale;
+            dist = -1; // Emissive spheres are not reflective
+        } else {
+            mat3 localToWorld = frameZ(normal);
+            org = org + dist * dir;
+            vec2 uv = vec2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
+            float jacobian;
+            vec3 dir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
+            float cosTheta = dir.z;
+            dir = localToWorld * dir;
+
+            throughput *= Kd; // Works thanks to importance sampling, for diffuse spheres
+
+            float rr = tinymt32_generate_floatOO(random);
+            float rrProb = min(0.9, luminance(throughput));
+            if (rr < rrProb) {
+                dist = intersectScene(org + 0.01 * dir, dir, position, normal, sphereIndex);
+                throughput /= rrProb;
+            } else {
+                dist = -1.0;
+            }
+        }
+    }
+    return color;
+}
+
+vec3 ambientOcclusion(vec3 org, vec3 dir, inout tinymt32_t random)
+{
     vec3 position, normal;
     vec3 color = vec3(0);
     float dist = intersectScene(org, dir, position, normal);
@@ -432,7 +503,8 @@ vec3 ambientOcclusion(vec3 org, vec3 dir, inout tinymt32_t random) {
     return vec3(0.);
 }
 
-vec3 normal(vec3 org, vec3 dir) {
+vec3 normal(vec3 org, vec3 dir)
+{
     vec3 position, normal;
     vec3 color = vec3(0);
     float dist = intersectScene(org, dir, position, normal);
@@ -469,12 +541,13 @@ void main() {
     vec3 org = uCameraPosition;
 
     //vec3 color = normal(org, dir);
-    vec3 color = ambientOcclusion(org, dir, random);
+    vec3 color = pathtracing(org, dir, random);
     //vec3 color = vec3(getRandFloat(pixelCoords));
     
     vec4 newEstimate = currentEstimate + vec4(color, 1);
+    vec3 finalColor = pow(newEstimate.xyz / newEstimate.w, vec3(0.45));
 
-    imageStore(uOutputImage, pixelCoords, vec4(newEstimate.xyz / newEstimate.w, 0));
+    imageStore(uOutputImage, pixelCoords, vec4(finalColor, 1));
     imageStore(uAccumImage, pixelCoords, newEstimate);
 
     tinymt32_store_state(pixelCoords, random);
