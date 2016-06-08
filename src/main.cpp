@@ -13,6 +13,7 @@
 #include <c2ba/glutils/GLTexture.hpp>
 #include <c2ba/glutils/GLFramebuffer.hpp>
 #include <c2ba/glutils/GLUniform.hpp>
+#include <c2ba/glutils/GLNVShaderBufferLoad.hpp>
 
 #include <c2ba/maths/types.hpp>
 #include <c2ba/maths/geometry.hpp>
@@ -568,7 +569,7 @@ int Application::run()
 {
     c2ba::RandomGenerator rng;
 
-    auto worldSize = 256.f;
+    auto worldSize = 512.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
     viewController.setViewMatrix(c2ba::transpose(c2ba::float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
 
@@ -600,13 +601,44 @@ int Application::run()
 
     c2ba::GLUniform<GLuint> uSphereCount{ program, "uSphereCount" };
 
+    C2BA_GLUNIFORM(program, GLuint, uTileCount);
+    C2BA_GLUNIFORM(program, GLuint, uTileOffset);
+    c2ba::GLUniform<c2ba::GLBufferAddress<Sphere>> uSphereArray{ program, "uSphereArray" };
+
+    c2ba::GLUniform<c2ba::GLBufferAddress<c2ba::int2>> uTileArray{ program, "uTileArray" };
+
     size_t framebufferWidth = m_nWindowWidth;
     size_t framebufferHeight = m_nWindowHeight;
 
     const auto& projMatrix = c2ba::perspective(45.f, float(framebufferWidth) / framebufferHeight, 0.01f, 100.f);
 
-    auto numGroupX = GLuint((framebufferWidth / 32) + (framebufferWidth % 32 != 0));
-    auto numGroupY = GLuint((framebufferHeight / 32) + (framebufferHeight % 32 != 0));
+    const auto tileSize = 32;
+    const auto tileCountX = GLint((framebufferWidth / tileSize) + (framebufferWidth % tileSize != 0));
+    const auto tileCountY = GLint((framebufferHeight / tileSize) + (framebufferHeight % tileSize != 0));
+    const auto tileCount = tileCountX * tileCountY;
+    const auto tileCountPerIteration = tileCountX * 8;
+
+    uTileCount.set(program, tileCountX * tileCountY);
+
+    auto computeTileVector = [&]()
+    {
+        std::vector<c2ba::int2> tileVector;
+        for (auto j = 0; j < tileCountY; ++j) {
+            for (auto i = 0; i < tileCountX; ++i) {
+                tileVector.emplace_back(c2ba::int2(i, j));
+            }
+        }
+        std::mt19937 rng;
+        std::shuffle(begin(tileVector), end(tileVector), rng);
+
+        return tileVector;
+    };
+
+    auto tileBuffer = c2ba::makeBufferStorage(computeTileVector());
+    auto tileBufferAddr = c2ba::getAddress(tileBuffer);
+    c2ba::makeResident(tileBuffer, GL_READ_ONLY);
+
+    uTileArray.set(program, tileBufferAddr);
 
     c2ba::GLFramebuffer2D<1, false> framebuffer;
     framebuffer.init(framebufferWidth, framebufferHeight, { GL_RGBA32F }, GL_NEAREST);
@@ -663,7 +695,7 @@ int Application::run()
     // Draw on screen
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
-    auto sphereCount = 128;
+    auto sphereCount = 1024;
     auto computeSpheres = [&]() {
         std::vector<Sphere> spheres;
         for (auto i = 0; i < sphereCount; ++i) {
@@ -684,14 +716,17 @@ int Application::run()
         tmpVector.emplace_back(c2ba::float4(sphere.center, sphere.sqrRadius));
         tmpVector.emplace_back();
     }
-    auto sphereBuffer = c2ba::genBufferStorage<Sphere>(sphereCount, sphereVector.data(), 0);
-    sphereBuffer.bindBase(GL_SHADER_STORAGE_BUFFER, 1);
+    auto sphereBuffer = c2ba::makeBufferStorage(sphereVector);
+    auto sphereBufferAddr = c2ba::getAddress(sphereBuffer);
+    c2ba::makeResident(sphereBuffer, GL_READ_ONLY);
+    uSphereArray.set(program, sphereBufferAddr);
 
     CPUSpherePathtracing spherePathracing;
     CPUSpherePathtracing::State pathtracingState;
     spherePathracing.sphereArray = sphereVector.data();
     spherePathracing.uSphereCount = sphereCount;
 
+    size_t tileOffset = 0;
     const auto gpuRender = [&](size_t iterationCount)
     {
         uIterationCount.set(iterationCount);
@@ -699,8 +734,12 @@ int Application::run()
         uRcpViewProjMatrix.set(c2ba::value_ptr(rcpViewProjMatrix));
         uCameraPosition.set(c2ba::value_ptr(viewController.getRcpViewMatrix()[3]));
         uSphereCount.set(GLuint(sphereCount));
+        uTileOffset.set(tileOffset);
 
-        glDispatchCompute(numGroupX, numGroupY, 1);
+        glDispatchCompute(tileCountPerIteration, 1, 1);
+
+        tileOffset += tileCountPerIteration;
+        tileOffset = tileOffset % tileCount;
     };
 
     const auto cpuRender = [&](size_t iterationCount)
@@ -718,8 +757,8 @@ int Application::run()
     for (auto iterationCount = 0u; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
         auto seconds = glfwGetTime();
 
-            gpuRender(iterationCount);
-            //cpuRender(iterationCount);
+        gpuRender(iterationCount);
+        //cpuRender(iterationCount);
 
         glClear(GL_COLOR_BUFFER_BIT);
 

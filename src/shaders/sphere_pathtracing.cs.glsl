@@ -1,4 +1,5 @@
-#version 430
+#version 450
+#extension GL_NV_shader_buffer_load : enable
 
 layout(local_size_x = 32, local_size_y = 32) in;
 
@@ -35,6 +36,9 @@ uniform uint uIterationCount;
 uniform mat4 uRcpViewProjMatrix; // Transform normalized device coordinates to world space
 uniform vec3 uCameraPosition;
 
+uniform uint uTileCount;
+uniform uint uTileOffset;
+uniform ivec2* uTileArray;
 
 uniform uint uMaterialCount;
 
@@ -43,10 +47,7 @@ layout(std430, binding = 0) buffer MaterialBuffer {
 };
 
 uniform uint uSphereCount;
-
-layout(std430, binding = 1) buffer SphereBuffer {
-    Sphere sphereArray[];
-};
+uniform Sphere* uSphereArray;
 
 uniform uint uPointLightCount;
 
@@ -401,7 +402,7 @@ float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal) {
     float currentDist = -1;
     for (uint i = 0; i < uSphereCount; ++i) {
         vec3 tmpPos, tmpNormal;
-        float t = intersectSphere(org, dir, sphereArray[i], tmpPos, tmpNormal);
+        float t = intersectSphere(org, dir, uSphereArray[i], tmpPos, tmpNormal);
         if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
             currentDist = t;
             position = tmpPos;
@@ -415,7 +416,7 @@ float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal, out
     float currentDist = -1;
     for (uint i = 0; i < uSphereCount; ++i) {
         vec3 tmpPos, tmpNormal;
-        float t = intersectSphere(org, dir, sphereArray[i], tmpPos, tmpNormal);
+        float t = intersectSphere(org, dir, uSphereArray[i], tmpPos, tmpNormal);
         if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
             currentDist = t;
             position = tmpPos;
@@ -441,6 +442,8 @@ float luminance(const vec3 color) {
 
 vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
 {
+	vec3 sunDirection = normalize(vec3(1, 1, -1));
+
     vec3 position, normal;
     vec3 throughput = vec3(1);
     vec3 color = vec3(0);
@@ -461,9 +464,9 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
             org = org + dist * dir;
             vec2 uv = vec2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
             float jacobian;
-            vec3 dir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
-            float cosTheta = dir.z;
-            dir = localToWorld * dir;
+            vec3 localDir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
+            float cosTheta = localDir.z;
+            dir = localToWorld * localDir;
 
             throughput *= Kd; // Works thanks to importance sampling, for diffuse spheres
 
@@ -477,6 +480,9 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
             }
         }
     }
+	// Environment lighting
+	color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
+
     return color;
 }
 
@@ -515,8 +521,12 @@ vec3 normal(vec3 org, vec3 dir)
 }
 
 void main() {
-    ivec2 framebufferSize = imageSize(uOutputImage);
-    ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 framebufferSize = imageSize(uOutputImage);
+
+	uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+	ivec2 tile = uTileArray[(tileIndex + uTileOffset) % uTileCount];
+
+    ivec2 pixelCoords = tile * ivec2(gl_WorkGroupSize.xy) + ivec2(gl_LocalInvocationID.xy);
 
     if (pixelCoords.x >= framebufferSize.x || pixelCoords.y >= framebufferSize.y) {
         return;
