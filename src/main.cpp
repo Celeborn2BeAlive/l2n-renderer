@@ -19,6 +19,9 @@
 #include <c2ba/maths/geometry.hpp>
 #include <c2ba/maths/sampling/Random.hpp>
 
+#include <imgui/imgui.h>
+#include <imgui/examples/opengl3_example/imgui_impl_glfw_gl3.h>
+
 #include <filesystem>
 #include <unordered_map>
 #include <thread>
@@ -167,6 +170,8 @@ class Application
 public:
     Application(int argc, char** argv);
 
+    ~Application();
+
     int run();
 private:
     fs::path m_AppPath;
@@ -205,6 +210,8 @@ Application::Application(int argc, char** argv)
 
     glfwMakeContextCurrent(m_pWindow);
 
+    glfwSwapInterval(0);
+
     if (!gladLoadGL()) {
         std::cerr << "Unable to init OpenGL.\n";
         throw std::runtime_error("Unable to init OpenGL.\n");
@@ -216,6 +223,15 @@ Application::Application(int argc, char** argv)
 
     m_ShadersRootPath = appDir / "glsl";
     loadShaders(m_ShadersRootPath, m_ShaderLibrary);
+
+    // Setup ImGui binding
+    ImGui_ImplGlfwGL3_Init(m_pWindow, true);
+}
+
+Application::~Application()
+{
+    ImGui_ImplGlfwGL3_Shutdown();
+    glfwTerminate();
 }
 
 struct Sphere {
@@ -616,7 +632,7 @@ int Application::run()
     const auto tileCountX = GLint((framebufferWidth / tileSize) + (framebufferWidth % tileSize != 0));
     const auto tileCountY = GLint((framebufferHeight / tileSize) + (framebufferHeight % tileSize != 0));
     const auto tileCount = tileCountX * tileCountY;
-    const auto tileCountPerIteration = tileCountX * 8;
+    auto tileCountPerIteration = tileCountX;
 
     uTileCount.set(program, tileCountX * tileCountY);
 
@@ -753,6 +769,7 @@ int Application::run()
         framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
     };
 
+
     /* Loop until the user closes the window */
     for (auto iterationCount = 0u; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
         auto seconds = glfwGetTime();
@@ -772,6 +789,22 @@ int Application::run()
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
+        ImGui_ImplGlfwGL3_NewFrame();
+
+        {
+            ImGui::Begin("Params");
+            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+            ImGui::InputInt("tileCountPerIteration", &tileCountPerIteration);
+            
+            ImGui::End();
+        }
+
+        // Rendering
+        int display_w, display_h;
+        glfwGetFramebufferSize(m_pWindow, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        ImGui::Render();
+
         /* Poll for and process events */
         glfwPollEvents();
 
@@ -779,12 +812,11 @@ int Application::run()
         glfwSwapBuffers(m_pWindow);
 
         auto ellapsedTime = glfwGetTime() - seconds;
-        if (viewController.update(float(ellapsedTime))) {
+        auto guiHasFocus = ImGui::GetIO().WantCaptureMouse || ImGui::GetIO().WantCaptureKeyboard;
+        if (!guiHasFocus && viewController.update(float(ellapsedTime))) {
             accumImage.clear(0, GL_RGBA, GL_FLOAT, c2ba::value_ptr(c2ba::float4(0)));
             std::fill(begin(cpuAccumImage), end(cpuAccumImage), c2ba::float4(0));
         }
-
-        //std::cerr << viewController.getViewMatrix() << std::endl;
     }
 
     return 0;

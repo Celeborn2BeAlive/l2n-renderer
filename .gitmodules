@@ -10,3 +10,6 @@
 [submodule "third-party/submodules/c2ba/glutils"]
 	path = third-party/submodules/c2ba/glutils
 	url = https://github.com/Celeborn2BeAlive/c2ba-glutils.git
+[submodule "third-party/submodules/imgui"]
+	path = third-party/submodules/imgui
+	url = https://github.com/ocornut/imgui

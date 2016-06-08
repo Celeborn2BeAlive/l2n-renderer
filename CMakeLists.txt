@@ -4,6 +4,9 @@ project(l2n-renderer)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+set(C2BA_GLUTILS_GL3_HEADER "<glad/glad.h>")
+set(C2BA_GLUTILS_GL3_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third-party/glad/include)
+add_definitions(-DC2BA_GLUTILS_GL3_HEADER=${C2BA_GLUTILS_GL3_HEADER})
 add_subdirectory(third-party/submodules)
 
 find_package(OpenGL REQUIRED)
@@ -18,6 +21,7 @@ file(
     L2N_SRC_FILES
     src/*.cpp src/*.hpp src/*.glsl
     third-party/glad/src/*.c
+    third-party/submodules/imgui/imgui.cpp third-party/submodules/imgui/imgui_demo.cpp third-party/submodules/imgui/imgui_draw.cpp
 )
 
 c2ba_add_shader_directory(${CMAKE_CURRENT_SOURCE_DIR}/src/shaders glsl)
@@ -44,9 +48,11 @@ target_include_directories(
     third-party/glad/include
     third-party/submodules/c2ba/maths/lib/include
     third-party/submodules/c2ba/glutils/lib/include
+    third-party/submodules/
 )
 
 source_group ("glsl" REGULAR_EXPRESSION "*.glsl")
+source_group ("imgui" REGULAR_EXPRESSION "third-party/submodules/imgui/*.*")
 
 install(
     TARGETS l2n
