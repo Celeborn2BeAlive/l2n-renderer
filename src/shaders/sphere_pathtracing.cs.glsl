@@ -121,8 +121,8 @@ layout(rgba32ui) uniform uimage2D uTinyMTRandomMatImage;
 struct tinymt32_t
 {
     uvec4 status;
-    uint mat1;
-    uint mat2;
+    uint mat_1;
+    uint mat_2;
     uint tmat;
 };
 
@@ -131,8 +131,8 @@ tinymt32_t tinymt32_load_state(ivec2 pixelCoords)
     tinymt32_t random;
     random.status = imageLoad(uTinyMTRandomStateImage, pixelCoords);
     uvec4 mat = imageLoad(uTinyMTRandomMatImage, pixelCoords);
-    random.mat1 = mat.x;
-    random.mat2 = mat.y;
+    random.mat_1 = mat.x;
+    random.mat_2 = mat.y;
     random.tmat = mat.z;
     return random;
 }
@@ -140,7 +140,7 @@ tinymt32_t tinymt32_load_state(ivec2 pixelCoords)
 void tinymt32_store_state(ivec2 pixelCoords, tinymt32_t random)
 {
     imageStore(uTinyMTRandomStateImage, pixelCoords, random.status);
-    uvec4 tmp = uvec4(random.mat1, random.mat2, random.tmat, 0);
+    uvec4 tmp = uvec4(random.mat_1, random.mat_2, random.tmat, 0);
     imageStore(uTinyMTRandomMatImage, pixelCoords, tmp);
 }
 
@@ -160,8 +160,8 @@ void tinymt32_next_state(inout tinymt32_t random) {
     random.status[1] = random.status[2];
     random.status[2] = x ^ (y << TINYMT32_SH1);
     random.status[3] = y;
-    random.status[1] ^= -(int(y & 1)) & random.mat1;
-    random.status[2] ^= -(int(y & 1)) & random.mat2;
+    random.status[1] ^= -(int(y & 1)) & random.mat_1;
+    random.status[2] ^= -(int(y & 1)) & random.mat_2;
 }
 
 /**
@@ -450,14 +450,16 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
     uint sphereIndex;
     float dist = intersectScene(org, dir, position, normal, sphereIndex);
     uint pathLength = 0;
-    while (dist >= 0.0) {
+    while (dist >= 0.0 && pathLength <= 1) {
         ++pathLength;
         vec3 Kd = getColor(sphereIndex);
 
         // One sphere on 16 is emissive
         if (sphereIndex % 16 == 0) {
-            float emissionScale = pathLength > 1 ? 30.0 : 30.0;
-            color += throughput * emissionScale;
+            float sqrRadius = uSphereArray[sphereIndex].sqrRadius;
+
+            float emissionScale = 8192.;
+            color += throughput * emissionScale / (4 * M_PI * sqrRadius);
             dist = -1; // Emissive spheres are not reflective
         } else {
             mat3 localToWorld = frameZ(normal);
@@ -481,7 +483,8 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
         }
     }
 	// Environment lighting
-	color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
+    if (pathLength == 0 || sphereIndex % 16 != 0)
+	    color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
 
     return color;
 }

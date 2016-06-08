@@ -196,7 +196,7 @@ Application::Application(int argc, char** argv)
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
 
-    m_pWindow = glfwCreateWindow(int(m_nWindowWidth), int(m_nWindowHeight), "Les lumieres de Noel", NULL, NULL);
+    m_pWindow = glfwCreateWindow(int(m_nWindowWidth), int(m_nWindowHeight), "Les Lumieres de Noel", NULL, NULL);
     if (!m_pWindow) {
         std::cerr << "Unable to open window.\n";
         glfwTerminate();
@@ -569,7 +569,7 @@ int Application::run()
 {
     c2ba::RandomGenerator rng;
 
-    auto worldSize = 512.f;
+    auto worldSize = 1024.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
     viewController.setViewMatrix(c2ba::transpose(c2ba::float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
 
@@ -701,7 +701,7 @@ int Application::run()
         for (auto i = 0; i < sphereCount; ++i) {
             spheres.emplace_back(
                 c2ba::float3(-worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat()),
-                0.1f * worldSize * rng.getFloat()
+                0.05f * worldSize * rng.getFloat()
                 );
         }
         return spheres;
