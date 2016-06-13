@@ -1,7 +1,7 @@
 #version 450
 #extension GL_NV_shader_buffer_load : enable
 
-layout(local_size_x = 32, local_size_y = 32) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
 #define M_PI 3.14159265358979323846
 
@@ -442,7 +442,7 @@ float luminance(const vec3 color) {
 
 vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
 {
-	vec3 sunDirection = normalize(vec3(1, 1, -1));
+    vec3 sunDirection = normalize(vec3(1, 1, -1));
 
     vec3 position, normal;
     vec3 throughput = vec3(1);
@@ -482,9 +482,9 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
             }
         }
     }
-	// Environment lighting
+    // Environment lighting
     if (pathLength == 0 || sphereIndex % 16 != 0)
-	    color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
+        color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
 
     return color;
 }
@@ -524,10 +524,10 @@ vec3 normal(vec3 org, vec3 dir)
 }
 
 void main() {
-	ivec2 framebufferSize = imageSize(uOutputImage);
+    ivec2 framebufferSize = imageSize(uOutputImage);
 
-	uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
-	ivec2 tile = uTileArray[(tileIndex + uTileOffset) % uTileCount];
+    uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    ivec2 tile = uTileArray[(tileIndex + uTileOffset) % uTileCount];
 
     ivec2 pixelCoords = tile * ivec2(gl_WorkGroupSize.xy) + ivec2(gl_LocalInvocationID.xy);
 

@@ -628,7 +628,7 @@ int Application::run()
 
     const auto& projMatrix = c2ba::perspective(45.f, float(framebufferWidth) / framebufferHeight, 0.01f, 100.f);
 
-    const auto tileSize = 32;
+    const auto tileSize = 16;
     const auto tileCountX = GLint((framebufferWidth / tileSize) + (framebufferWidth % tileSize != 0));
     const auto tileCountY = GLint((framebufferHeight / tileSize) + (framebufferHeight % tileSize != 0));
     const auto tileCount = tileCountX * tileCountY;
