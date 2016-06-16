@@ -49,6 +49,7 @@ target_include_directories(
     third-party/submodules/c2ba/maths/lib/include
     third-party/submodules/c2ba/glutils/lib/include
     third-party/submodules/
+    third-party/submodules/json/src
 )
 
 source_group ("glsl" REGULAR_EXPRESSION "*.glsl")

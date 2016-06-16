@@ -22,10 +22,13 @@
 #include <imgui/imgui.h>
 #include <imgui/examples/opengl3_example/imgui_impl_glfw_gl3.h>
 
+#include "json.hpp"
+
 #include <filesystem>
 #include <unordered_map>
 #include <thread>
 #include <atomic>
+#include <fstream>
 
 #include "shaders.hpp"
 #include "ViewController.hpp"
@@ -34,6 +37,7 @@
 #include "shaders.hpp"
 
 using namespace c2ba;
+using json = nlohmann::json;
 
 namespace l2n
 {
@@ -517,11 +521,23 @@ struct CPUSpherePathtracing
 
 int Application::run()
 {
+    float4x4 viewMatrix;
+    if (fs::exists(m_AppPath.parent_path() / "l2n_cache.json")) {
+        std::ifstream in { m_AppPath.parent_path() / "l2n_cache.json" };
+        json l2n_cache;
+        in >> l2n_cache;
+        std::vector<float> values = l2n_cache["view_matrix"];
+        std::copy(begin(values), end(values), value_ptr(viewMatrix));
+    }
+    else {
+        viewMatrix = transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0));
+    }
+
     RandomGenerator rng;
 
     auto worldSize = 1024.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
-    viewController.setViewMatrix(transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
+    viewController.setViewMatrix(viewMatrix);
 
     //viewController.setViewMatrix(transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
 
@@ -530,15 +546,6 @@ int Application::run()
 
     GLUniform<GLSLImage2Df> uOutputImage{ program, "uOutputImage" };
     uOutputImage.set(program, OUTPUT_IMAGE_BINDING);
-
-    GLUniform<GLSLImage2Df> uRandomStateImage{ program, "uRandomStateImage" };
-    uRandomStateImage.set(program, RANDOM_STATE_IMAGE_BINDING);
-
-    GLUniform<GLSLImage2Df> uTinyMTRandomStateImage{ program, "uTinyMTRandomStateImage" };
-    uTinyMTRandomStateImage.set(program, TINYMT_RANDOM_STATE_IMAGE_BINDING);
-
-    GLUniform<GLSLImage2Df> uTinyMTRandomMatImage{ program, "uTinyMTRandomMatImage" };
-    uTinyMTRandomMatImage.set(program, TINYMT_RANDOM_MAT_IMAGE_BINDING);
 
     GLUniform<GLSLImage2Df> uAccumImage{ program, "uAccumImage" };
     uAccumImage.set(program, ACCUM_IMAGE_BINDING);
@@ -727,6 +734,16 @@ int Application::run()
             accumImage.clear(0, GL_RGBA, GL_FLOAT, value_ptr(float4(0)));
             std::fill(begin(cpuAccumImage), end(cpuAccumImage), float4(0));
         }
+    }
+
+    {
+        json l2n_cache;
+        std::vector<float> values(16);
+        auto ptr = value_ptr(viewController.getViewMatrix());
+        std::copy(ptr, ptr + 16, begin(values));
+        l2n_cache["view_matrix"] = values;
+        std::ofstream out{ m_AppPath.parent_path() / "l2n_cache.json" };
+        out << l2n_cache.dump(4);
     }
 
     return 0;
