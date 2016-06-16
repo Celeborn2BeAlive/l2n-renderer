@@ -691,6 +691,9 @@ int Application::run()
         for (auto i = 0u; i < framebufferWidth * framebufferHeight; ++i) {
             auto seed = rng.getUInt();
             tinymt32_t random;
+            random.mat1 = 0xda251b45;
+            random.mat2 = 0xfed0ffb5;
+            random.tmat = 0x9b5cf7ff;
             tinymt32_init(&random, seed);
             states[i] = c2ba::uint4(random.status[0], random.status[1], random.status[2], random.status[3]);
             mats[i] = c2ba::uint4(random.mat1, random.mat2, random.tmat, 0);
