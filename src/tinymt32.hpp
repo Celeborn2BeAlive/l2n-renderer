@@ -62,6 +62,7 @@ struct TINYMT32_T {
     uint32_t mat1;
     uint32_t mat2;
     uint32_t tmat;
+    uint32_t _align0;
 };
 
 typedef struct TINYMT32_T tinymt32_t;
