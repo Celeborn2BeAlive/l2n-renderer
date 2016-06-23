@@ -34,6 +34,7 @@
 #include "ViewController.hpp"
 
 #include "tinymt32.hpp"
+#include "tinymt32dc.hpp"
 #include "shaders.hpp"
 
 using namespace c2ba;
@@ -234,7 +235,7 @@ struct CPUSpherePathtracing
     float4x4 uRcpProjMatrix;
     float4x4 uRcpViewProjMatrix;
     float3 uCameraPosition;
-    const Sphere* sphereArray;
+    const Sphere* uSphereArray;
     size_t uSphereCount;
 
     // zAxis should be normalized
@@ -305,11 +306,26 @@ struct CPUSpherePathtracing
         float currentDist = -1;
         for (auto i = 0; i < uSphereCount; ++i) {
             float3 tmpPos, tmpNormal;
-            float t = intersectSphere(org, dir, sphereArray[i], tmpPos, tmpNormal);
+            float t = intersectSphere(org, dir, uSphereArray[i], tmpPos, tmpNormal);
             if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
                 currentDist = t;
                 position = tmpPos;
                 normal = tmpNormal;
+            }
+        }
+        return currentDist;
+    }
+
+    float intersectScene(float3 org, float3 dir, float3& position, float3& normal, uint32_t& sphereIndex) {
+        float currentDist = -1;
+        for (auto i = 0; i < uSphereCount; ++i) {
+            float3 tmpPos, tmpNormal;
+            float t = intersectSphere(org, dir, uSphereArray[i], tmpPos, tmpNormal);
+            if (t >= 0.f && (currentDist < 0.f || t < currentDist)) {
+                currentDist = t;
+                position = tmpPos;
+                normal = tmpNormal;
+                sphereIndex = i;
             }
         }
         return currentDist;
@@ -355,6 +371,70 @@ struct CPUSpherePathtracing
             return normal;
         }
         return float3(0);
+    }
+
+    float3 getColor(uint32_t n) {
+        return fract(
+            sin(
+                float(n + 1) * float3(12.9898, 78.233, 56.128)
+                )
+            * 43758.5453f
+            );
+    }
+
+    float luminance(const float3 color) {
+        return 0.212671 * color.r + 0.715160 * color.g + 0.072169 * color.b;
+    }
+
+    float3 pathtracing(float3 org, float3 dir, tinymt32_t * random)
+    {
+        float3 sunDirection = normalize(float3(1, 1, -1));
+
+        float3 position, normal;
+        float3 throughput = float3(1);
+        float3 color = float3(0);
+        uint32_t sphereIndex;
+        float dist = intersectScene(org, dir, position, normal, sphereIndex);
+        uint32_t pathLength = 0;
+        while (dist >= 0.0 && pathLength <= 1) {
+            ++pathLength;
+            float3 Kd = getColor(sphereIndex);
+
+            // One sphere on 16 is emissive
+            if (sphereIndex % 16 == 0) {
+                float sqrRadius = uSphereArray[sphereIndex].sqrRadius;
+
+                float emissionScale = 8192.;
+                color += throughput * emissionScale / (4 * pi<float>() * sqrRadius);
+                dist = -1; // Emissive spheres are not reflective
+            }
+            else {
+                float3x3 localToWorld = frameZ(normal);
+                org = org + dist * dir;
+                float2 uv = float2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
+                float jacobian;
+                float3 localDir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
+                float cosTheta = localDir.z;
+                dir = localToWorld * localDir;
+
+                throughput *= Kd; // Works thanks to importance sampling, for diffuse spheres
+
+                float rr = tinymt32_generate_floatOO(random);
+                float rrProb = min(0.9f, luminance(throughput));
+                if (rr < rrProb) {
+                    dist = intersectScene(org + 0.01f * dir, dir, position, normal, sphereIndex);
+                    throughput /= rrProb;
+                }
+                else {
+                    dist = -1.0;
+                }
+            }
+        }
+        // Environment lighting
+        if (pathLength == 0 || sphereIndex % 16 != 0)
+            color += throughput * 3.f * pow(max(0.f, dot(sunDirection, dir)), 128);
+
+        return color;
     }
 
     void renderPixels(
@@ -424,26 +504,12 @@ struct CPUSpherePathtracing
     }
 
     void renderTiles(
-        float4* finalImage, float4* accumImage, size_t imageWidth, size_t imageHeight, State& state)
+        float4* finalImage, float4* accumImage, size_t imageWidth, size_t imageHeight, tinymt32_t * uRandomStateArray, const int2* uTileArray, size_t tileCountPerIt, size_t uTileOffset)
     {
-        const auto tileSize = 32;
+        const auto tileSize = 16;
         const auto tileCountX = imageWidth / tileSize + ((imageWidth % tileSize > 0) ? 1 : 0);
         const auto tileCountY = imageHeight / tileSize + ((imageHeight % tileSize > 0) ? 1 : 0);
-        const auto tileCount = tileCountX * tileCountY;
-
-        if (state.randoms.size() != tileCount) {
-            RandomGenerator rng;
-            std::vector<Random> randomsVector(tileCount);
-            for (auto i = 0u; i < tileCount; ++i) {
-                auto seed = rng.getUInt();
-                setSeed(randomsVector[i], seed);
-            }
-            std::swap(randomsVector, state.randoms);
-
-            state.iteration = 0;
-        }
-
-        auto* randoms = state.randoms.data();
+        const auto uTileCount = tileCountX * tileCountY;
 
         const auto threadCount = std::thread::hardware_concurrency();
         const auto pixelCount = imageWidth * imageHeight;
@@ -455,26 +521,30 @@ struct CPUSpherePathtracing
         auto taskFunctor = [&]()
         {
             size_t tileIndex;
-            while (tileCount > (tileIndex = nextTileIndex++)) {
-                const auto tileX = tileIndex % tileCountX;
-                const auto tileY = tileIndex / tileCountX;
-
-                auto* const random = randoms + tileIndex;
+            while (tileCountPerIt > (tileIndex = nextTileIndex++)) {
+                
+                const int2 tile = uTileArray[(tileIndex + uTileOffset) % uTileCount];
+                const size_t tileX = tile.x;
+                const size_t tileY = tile.y;
 
                 for (auto pixelY = tileY * tileSize, endY = min(pixelY + tileSize, imageHeight); pixelY < endY; ++pixelY) {
                     for (auto pixelX = tileX * tileSize, endX = min(pixelX + tileSize, imageWidth); pixelX < endX; ++pixelX) {
                         const auto pixelIndex = pixelX + pixelY * imageWidth;
 
+                        auto* const random = uRandomStateArray + pixelIndex;
+
                         const int2 pixelCoords(pixelIndex % imageWidth, pixelIndex / imageWidth);
 
-                        const auto jitterIndex = state.iteration % (jitterSize * jitterSize);
-                        const auto jitterX = jitterIndex % jitterSize;
-                        const auto jitterY = jitterIndex / jitterSize;
+                        //const auto jitterIndex = state.iteration % (jitterSize * jitterSize);
+                        //const auto jitterX = jitterIndex % jitterSize;
+                        //const auto jitterY = jitterIndex / jitterSize;
 
-                        const float2 jitterSample = float2(0.5);
-                        const float2 pixelSample = jitterLength * float2(jitterX, jitterY) + jitterSample * jitterLength;//float2(randFloat(*random), randFloat(*random));
+                        //const float2 jitterSample = float2(0.5);
+                        //const float2 pixelSample = jitterLength * float2(jitterX, jitterY) + jitterSample * jitterLength;//float2(randFloat(*random), randFloat(*random));
                         //float pixelSampleJacobian;
                         //float2 diskSample = uniformSampleDisk(1, pixelSample.x, pixelSample.y, pixelSampleJacobian);
+
+                        const float2 pixelSample = float2(tinymt32_generate_floatOO(random), tinymt32_generate_floatOO(random));
 
                         const float2 rasterCoords = float2(pixelCoords) + pixelSample;
                         const float2 sampleCoords = rasterCoords / float2(imageWidth, imageHeight);
@@ -489,12 +559,13 @@ struct CPUSpherePathtracing
 
                         //const float3 color = hit(org, dir);
                         //const float3 color = normal(org, dir);
-                        float3 color = ambientOcclusion(org, dir, *random);
-                        //vec3 color = vec3(getRandFloat(pixelCoords));
+                        //float3 color = ambientOcclusion(org, dir, *random);
+                        float3 color = pathtracing(org, dir, random);
 
                         accumImage[pixelIndex] += float4(color, 1.f);
 
                         finalImage[pixelIndex] = accumImage[pixelIndex] / accumImage[pixelIndex].w;
+                        finalImage[pixelIndex] = pow(finalImage[pixelIndex], float4(0.45f));
                     }
                 }
             }
@@ -508,14 +579,12 @@ struct CPUSpherePathtracing
         for (auto& thread : threads) {
             thread.join();
         }
-
-        ++state.iteration;
     }
 
     void render(
-        float4* finalImage, float4* accumImage, size_t imageWidth, size_t imageHeight, State& state)
+        float4* finalImage, float4* accumImage, size_t imageWidth, size_t imageHeight, tinymt32_t* uRandomStateArray, const int2* tiles, size_t tileCountPerIt, size_t tileOffset)
     {
-        return renderTiles(finalImage, accumImage, imageWidth, imageHeight, state);
+        return renderTiles(finalImage, accumImage, imageWidth, imageHeight, uRandomStateArray, tiles, tileCountPerIt, tileOffset);
     }
 };
 
@@ -553,6 +622,9 @@ int Application::run()
     GLUniform<GLuint> uIterationCount{ program, "uIterationCount" };
 
     GLUniform<GLfloat4x4> uRcpViewProjMatrix{ program, "uRcpViewProjMatrix" };
+    C2BA_GLUNIFORM(program, GLfloat4x4, uRcpViewMatrix);
+    C2BA_GLUNIFORM(program, float, uProjTanHalfFovy);
+    C2BA_GLUNIFORM(program, float, uProjRatio);
 
     GLUniform<GLfloat3> uCameraPosition{ program, "uCameraPosition" };
 
@@ -569,9 +641,14 @@ int Application::run()
     size_t framebufferWidth = m_nWindowWidth;
     size_t framebufferHeight = m_nWindowHeight;
 
-    const auto& projMatrix = perspective(45.f, float(framebufferWidth) / framebufferHeight, 0.01f, 100.f);
+    const auto projRatio = float(framebufferWidth) / framebufferHeight;
+    const auto projTanHalfFovy = tan(0.5f * radians(45.f));
+    const auto& projMatrix = perspective(radians(45.f), float(framebufferWidth) / framebufferHeight, 0.01f, 100.f);
 
-    const auto tileSize = 16;
+    uProjRatio.set(projRatio);
+    uProjTanHalfFovy.set(projTanHalfFovy);
+
+    const auto tileSize = 32;
     const auto tileCountX = GLint((framebufferWidth / tileSize) + (framebufferWidth % tileSize != 0));
     const auto tileCountY = GLint((framebufferHeight / tileSize) + (framebufferHeight % tileSize != 0));
     const auto tileCount = tileCountX * tileCountY;
@@ -592,8 +669,8 @@ int Application::run()
 
         return tileVector;
     };
-
-    auto tileBuffer = makeBufferStorage(computeTileVector());
+    const auto tileVector = computeTileVector();
+    auto tileBuffer = makeBufferStorage(tileVector);
     auto tileBufferAddr = getAddress(tileBuffer);
     makeResident(tileBuffer, GL_READ_ONLY);
 
@@ -606,20 +683,23 @@ int Application::run()
 
     auto computeTinyMTStateVector = [&]()
     {
+        std::mt19937 rng;
         std::vector<tinymt32_t> states(framebufferWidth * framebufferHeight);
         std::generate(begin(states), end(states), [&]()
         {
-            auto seed = rng.getUInt();
+            auto seed = rng();
+            tinymt32_params params = precomputed_tinymt_params[rng() % precomputed_tinymt_params_count()];
             tinymt32_t random;
-            random.mat1 = 0xda251b45;
-            random.mat2 = 0xfed0ffb5;
-            random.tmat = 0x9b5cf7ff;
+            random.mat1 = params.mat1;
+            random.mat2 = params.mat2;
+            random.tmat = params.tmat;
             tinymt32_init(&random, seed);
             return random;
         });
         return states;
     };
-    auto tinyMTStateBuffer = makeBufferStorage(computeTinyMTStateVector());
+    auto tinyMTStateVector = computeTinyMTStateVector();
+    auto tinyMTStateBuffer = makeBufferStorage(tinyMTStateVector);
     makeResident(tinyMTStateBuffer, GL_READ_WRITE);
     uRandomStateArray.set(program, getAddress(tinyMTStateBuffer));
 
@@ -656,8 +736,11 @@ int Application::run()
 
     CPUSpherePathtracing spherePathracing;
     CPUSpherePathtracing::State pathtracingState;
-    spherePathracing.sphereArray = sphereVector.data();
+    spherePathracing.uSphereArray = sphereVector.data();
     spherePathracing.uSphereCount = sphereCount;
+
+    std::cerr << projMatrix << std::endl;
+    std::cerr << inverse(projMatrix) << std::endl;
 
     size_t tileOffset = 0;
     const auto gpuRender = [&](size_t iterationCount)
@@ -665,6 +748,7 @@ int Application::run()
         uIterationCount.set(iterationCount);
         auto rcpViewProjMatrix = inverse(projMatrix * viewController.getViewMatrix());
         uRcpViewProjMatrix.set(value_ptr(rcpViewProjMatrix));
+        uRcpViewMatrix.set(value_ptr(viewController.getRcpViewMatrix()));
         uCameraPosition.set(value_ptr(viewController.getRcpViewMatrix()[3]));
         uSphereCount.set(GLuint(sphereCount));
         uTileOffset.set(tileOffset);
@@ -682,8 +766,11 @@ int Application::run()
         spherePathracing.uRcpViewProjMatrix = inverse(projMatrix * viewController.getViewMatrix());
         spherePathracing.uRcpProjMatrix = inverse(projMatrix);
 
-        spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, pathtracingState);
+        spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, tinyMTStateVector.data(), tileVector.data(), tileCountPerIteration, tileOffset);
         framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
+
+        tileOffset += tileCountPerIteration;
+        tileOffset = tileOffset % tileCount;
     };
 
 

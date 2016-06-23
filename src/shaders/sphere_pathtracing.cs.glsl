@@ -2,7 +2,7 @@
 #extension GL_NV_shader_buffer_load : enable
 #extension GL_NV_gpu_shader5 : enable
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 32, local_size_y = 32) in;
 
 #define M_PI 3.14159265358979323846
 
@@ -38,7 +38,9 @@ struct DirectionalLight
 };
 
 uniform uint uIterationCount;
-uniform mat4 uRcpViewProjMatrix; // Transform normalized device coordinates to world space
+uniform mat4 uRcpViewMatrix;
+uniform float uProjRatio;
+uniform float uProjTanHalfFovy;
 uniform vec3 uCameraPosition;
 
 uniform uint uTileCount;
@@ -194,8 +196,9 @@ float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal) {
     return currentDist;
 }
 
-float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal, out uint sphereIndex) {
+float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal, out int sphereIndex) {
     float currentDist = -1;
+	sphereIndex = -1;
     for (uint i = 0; i < uSphereCount; ++i) {
         vec3 tmpPos, tmpNormal;
         float t = intersectSphere(org, dir, uSphereArray[i], tmpPos, tmpNormal);
@@ -203,7 +206,7 @@ float intersectScene(vec3 org, vec3 dir, out vec3 position, out vec3 normal, out
             currentDist = t;
             position = tmpPos;
             normal = tmpNormal;
-            sphereIndex = i;
+            sphereIndex = int(i);
         }
     }
     return currentDist;
@@ -229,7 +232,7 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
     vec3 position, normal;
     vec3 throughput = vec3(1);
     vec3 color = vec3(0);
-    uint sphereIndex;
+    int sphereIndex = -1;
     float dist = intersectScene(org, dir, position, normal, sphereIndex);
     uint pathLength = 0;
     while (dist >= 0.0 && pathLength <= 1) {
@@ -242,7 +245,7 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
 
             float emissionScale = 8192.;
             color += throughput * emissionScale / (4 * M_PI * sqrRadius);
-            dist = -1; // Emissive spheres are not reflective
+            dist = -2; // Emissive spheres are not reflective
         } else {
             mat3 localToWorld = frameZ(normal);
             org = org + dist * dir;
@@ -260,12 +263,12 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
                 dist = intersectScene(org + 0.01 * dir, dir, position, normal, sphereIndex);
                 throughput /= rrProb;
             } else {
-                dist = -1.0;
+                dist = -2.0;
             }
         }
     }
     // Environment lighting
-    if (pathLength == 0 || sphereIndex % 16 != 0)
+    if (dist == -1.0 && sphereIndex % 16 != 0)
         color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
 
     return color;
@@ -331,13 +334,15 @@ void main() {
     vec2 sampleCoords = rasterCoords / vec2(framebufferSize);
 
     vec4 ndCoords = vec4(-1, -1, 1, 1) + vec4(2.0 * sampleCoords, 0, 0); // Normalized device coordinates
-    vec4 viewCoords = uRcpViewProjMatrix * ndCoords;
-    viewCoords /= viewCoords.w;
+	
+	ndCoords *= vec4(uProjRatio * uProjTanHalfFovy, uProjTanHalfFovy, -1, 1); // Equivalent to multiplication by the inverse perspective matrix, but better numerical precision
+    vec4 worldCoords = uRcpViewMatrix * ndCoords;
 
-    vec3 dir = normalize(viewCoords.xyz - uCameraPosition);
+    vec3 dir = normalize(worldCoords.xyz - uCameraPosition);
     vec3 org = uCameraPosition;
 
     //vec3 color = normal(org, dir);
+	//vec3 color = ambientOcclusion(org, dir, random);
     vec3 color = pathtracing(org, dir, random);
     //vec3 color = vec3(getRandFloat(pixelCoords));
     
