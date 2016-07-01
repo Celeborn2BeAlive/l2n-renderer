@@ -591,14 +591,28 @@ struct CPUSpherePathtracing
 int Application::run()
 {
     float4x4 viewMatrix;
-    if (fs::exists(m_AppPath.parent_path() / "l2n_cache.json")) {
-        std::ifstream in { m_AppPath.parent_path() / "l2n_cache.json" };
-        json l2n_cache;
-        in >> l2n_cache;
-        std::vector<float> values = l2n_cache["view_matrix"];
-        std::copy(begin(values), end(values), value_ptr(viewMatrix));
+
+    try {
+        if (fs::exists(m_AppPath.parent_path() / "l2n_cache.json")) {
+            std::ifstream in{ m_AppPath.parent_path() / "l2n_cache.json" };
+            json l2n_cache;
+            in >> l2n_cache;
+            auto it = l2n_cache.find("view_matrix");
+            if (it != std::end(l2n_cache)) {
+                std::vector<float> values = *it;
+                std::copy(begin(values), end(values), value_ptr(viewMatrix));
+            }
+            else {
+                viewMatrix = transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0));
+            }
+        }
+        else {
+            viewMatrix = transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0));
+        }
     }
-    else {
+    catch (...)
+    {
+        std::cerr << "Unable to load json settings file" << std::endl;
         viewMatrix = transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0));
     }
 

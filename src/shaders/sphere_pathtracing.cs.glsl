@@ -225,10 +225,52 @@ float luminance(const vec3 color) {
     return 0.212671 * color.r + 0.715160 * color.g + 0.072169 * color.b;
 }
 
+vec3 sun_Le(vec3 dir)
+{
+	vec3 sunDirection = normalize(vec3(1, 1, -1));
+	return vec3(pow(max(0, dot(sunDirection, dir)), 128));
+}
+
+vec2 complex_sqr(vec2 c)
+{
+	return vec2(c.x * c.x - c.y * c.y, 2 * c.x * c.y);
+}
+
+vec3 mandelbrot_Le(vec3 dir)
+{
+	float cosTheta = dir.z;
+	float sinTheta = sqrt(dot(vec2(dir), vec2(dir)));
+	float theta = atan(sinTheta, cosTheta);
+	float phi = atan(dir.y, dir.x);
+	float u = phi / M_PI;
+	float v = -1 + 2 * theta / M_PI;
+
+	vec2 p = 2 * vec2(4, 2) * vec2(u, v);
+
+	vec2 z = vec2(0);
+	uint count = 64;
+	int i;
+	for (i = 0; i < count; ++i) {
+		z = complex_sqr(z) + p;
+
+		if (dot(z, z) > 4) {
+			break;
+		}
+	}
+
+	//if (i < 16) {
+	//	return vec3(0);
+	//}
+
+	if (dot(z, z) > 4) {
+		return vec3(i / float(count));
+	}
+
+	return vec3(0);
+}
+
 vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
 {
-    vec3 sunDirection = normalize(vec3(1, 1, -1));
-
     vec3 position, normal;
     vec3 throughput = vec3(1);
     vec3 color = vec3(0);
@@ -253,7 +295,7 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
             float jacobian;
             vec3 localDir = cosineSampleHemisphere(uv.x, uv.y, jacobian);
             float cosTheta = localDir.z;
-            dir = localToWorld * localDir;
+            dir = normalize(localToWorld * localDir);
 
             throughput *= Kd; // Works thanks to importance sampling, for diffuse spheres
 
@@ -269,7 +311,7 @@ vec3 pathtracing(vec3 org, vec3 dir, inout tinymt32_t random)
     }
     // Environment lighting
     if (dist == -1.0 && sphereIndex % 16 != 0)
-        color += throughput * 3.f * pow(max(0, dot(sunDirection, dir)), 128);
+        color += throughput * 3.f * mandelbrot_Le(dir);
 
     return color;
 }
