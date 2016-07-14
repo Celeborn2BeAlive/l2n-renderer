@@ -18,6 +18,7 @@
 #include <c2ba/maths/types.hpp>
 #include <c2ba/maths/geometry.hpp>
 #include <c2ba/maths/sampling/Random.hpp>
+#include <c2ba/maths/aabb.hpp>
 
 #include <imgui/imgui.h>
 #include <imgui/examples/opengl3_example/imgui_impl_glfw_gl3.h>
@@ -173,7 +174,8 @@ Application::~Application()
     glfwTerminate();
 }
 
-struct Sphere {
+struct Sphere 
+{
     float3 center;
     float sqrRadius;
     uint32_t materialID;
@@ -182,6 +184,14 @@ struct Sphere {
     Sphere(const float3& center, float radius) :
         center(center), sqrRadius(radius * radius), materialID(0) {
     }
+};
+
+struct VertexAttributes
+{
+    float3 normal;
+    float align0;
+    float2 texCoords;
+    float align1[2];
 };
 
 enum ImageBindings 
@@ -588,6 +598,195 @@ struct CPUSpherePathtracing
     }
 };
 
+void tesselateSphereInfo(uint32_t discLat, uint32_t discLong, uint32_t& vertexCount, uint32_t& indexCount)
+{
+    vertexCount = (discLong + 1) * (discLat + 1);
+    indexCount = discLong * discLat * 6;
+}
+
+template<typename VertexFunctor, typename IndexFunctor>
+void tesselateSphere(const float3& center, float r, uint32_t discLat, uint32_t discLong, VertexFunctor&& addVertex, IndexFunctor&& addIndex)
+{
+    // Equation paramétrique en (r, phi, theta) de la sphère
+    // avec r >= 0, -PI / 2 <= theta <= PI / 2, 0 <= phi <= 2PI
+    //
+    // x(r, phi, theta) = r sin(phi) cos(theta)
+    // y(r, phi, theta) = r sin(theta)
+    // z(r, phi, theta) = r cos(phi) cos(theta)
+    //
+    // Discrétisation:
+    // dPhi = 2PI / discLat, dTheta = PI / discLong
+    //
+    // x(r, i, j) = r * sin(i * dPhi) * cos(-PI / 2 + j * dTheta)
+    // y(r, i, j) = r * sin(-PI / 2 + j * dTheta)
+    // z(r, i, j) = r * cos(i * dPhi) * cos(-PI / 2 + j * dTheta)
+
+    float rcpLat = 1.f / discLat, rcpLong = 1.f / discLong;
+    float dPhi = 2 * pi<float>() * rcpLat, dTheta = pi<float>() * rcpLong;
+
+    // Construit l'ensemble des vertex
+    for (uint32_t j = 0; j <= discLong; ++j) {
+        float cosTheta = cos(-pi<float>() * 0.5f + j * dTheta);
+        float sinTheta = sin(-pi<float>() * 0.5f + j * dTheta);
+
+        for (uint32_t i = 0; i <= discLat; ++i) {
+            float3 normal(sin(i * dPhi) * cosTheta, sinTheta, cos(i * dPhi) * cosTheta);
+            addVertex(center + r * normal, normal, float2(i * rcpLat, 1.f - j * rcpLong));
+        }
+    }
+
+    // Construit les vertex finaux en regroupant les données en triangles:
+    // Pour une longitude donnée, les deux triangles formant une face sont de la forme:
+    // (i, i + 1, i + discLat + 1), (i, i + discLat + 1, i + discLat)
+    // avec i sur la bande correspondant à la longitude
+    for (uint32_t j = 0; j < discLong; ++j) {
+        uint32_t offset = j * (discLat + 1);
+        for (uint32_t i = 0; i < discLat; ++i) {
+            addIndex(offset + i);
+            addIndex(offset + (i + 1));
+            addIndex(offset + discLat + 1 + (i + 1));
+
+            addIndex(offset + i);
+            addIndex(offset + discLat + 1 + (i + 1));
+            addIndex(offset + discLat + 1 + i);
+        }
+    }
+}
+
+const size_t sphereCount = 128;
+const float worldSize = 1024.f;
+
+std::vector<Sphere> computeSpheres() {
+    RandomGenerator rng;
+    std::vector<Sphere> spheres;
+    for (auto i = 0; i < sphereCount; ++i) {
+        spheres.emplace_back(
+            float3(-worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat()),
+            0.05f * worldSize * rng.getFloat()
+            );
+    }
+    return spheres;
+};
+
+struct PathtracingProgram
+{
+    GLProgram program;
+
+    GLUniform<GLSLImage2Df> uOutputImage{ program, "uOutputImage" };
+    GLUniform<GLSLImage2Df> uAccumImage{ program, "uAccumImage" };
+    GLUniform<GLuint> uIterationCount{ program, "uIterationCount" };
+    GLUniform<GLfloat4x4> uRcpViewProjMatrix{ program, "uRcpViewProjMatrix" };
+    C2BA_GLUNIFORM(program, GLfloat4x4, uRcpViewMatrix);
+    C2BA_GLUNIFORM(program, float, uProjTanHalfFovy);
+    C2BA_GLUNIFORM(program, float, uProjRatio);
+    GLUniform<GLfloat3> uCameraPosition{ program, "uCameraPosition" };
+    C2BA_GLUNIFORM(program, GLuint, uTileCount);
+    C2BA_GLUNIFORM(program, GLuint, uTileOffset);
+    GLUniform<GLBufferAddress<int2>> uTileArray{ program, "uTileArray" };
+    C2BA_GLUNIFORM(program, GLBufferAddress<tinymt32_t>, uRandomStateArray);
+
+    PathtracingProgram(const fs::path& rootDir, const ShaderLibrary& shaderLibrary, const std::string& computeShader) : program{ compileProgram(rootDir, shaderLibrary, computeShader, "rand_tinymt32.cs.glsl") }
+    {
+        uOutputImage.set(program, OUTPUT_IMAGE_BINDING);
+        uAccumImage.set(program, ACCUM_IMAGE_BINDING);
+    }
+};
+
+struct SphereProgram: public PathtracingProgram
+{
+    GLUniform<GLuint> uSphereCount{ program, "uSphereCount" };
+    GLUniform<GLBufferAddress<Sphere>> uSphereArray{ program, "uSphereArray" };
+
+    GLBufferStorage<Sphere> sphereBuffer;
+
+    SphereProgram(const fs::path& rootDir, const ShaderLibrary& shaderLibrary) : PathtracingProgram{ rootDir, shaderLibrary, "sphere_pathtracing.cs.glsl" }
+    {
+        // #todo improve buffer interface to be able to pass a memory layout instead of a single type
+        // Something like GLBuffer<GLBufferLayout<GLuint, Sphere[]>> myBuffer;
+        // Only one unspecified sized array allows, at the end of the type list
+        sphereBuffer = makeBufferStorage(computeSpheres());
+        makeResident(sphereBuffer, GL_READ_ONLY);
+        uSphereArray.set(program, getAddress(sphereBuffer));
+        uSphereCount.set(program, GLuint(sphereCount));
+    }
+};
+
+struct TriangleProgram: public PathtracingProgram
+{
+    C2BA_GLUNIFORM(program, uint32_t, uMeshCount);
+    C2BA_GLUNIFORM(program, uint32_t*, uTriangleCount); // Number of triangle of each mesh
+    C2BA_GLUNIFORM(program, uint32_t*, uIndexOffset); // Offset in uIndexBuffer for each mesh
+    C2BA_GLUNIFORM(program, float4*, uVertexBuffer);
+    C2BA_GLUNIFORM(program, VertexAttributes*, uVertexAttributesBuffer);
+    C2BA_GLUNIFORM(program, uint32_t*, uIndexBuffer); // Each triangle is described by 3 consecutive indices, poiting in uVertexBuffer
+
+    GLBufferStorage<float4> gpuVertexBuffer;
+    GLBufferStorage<VertexAttributes> gpuVertexAttrBuffer;
+    GLBufferStorage<uint32_t> gpuIndexBuffer;
+    GLBufferStorage<uint32_t> gpuTriangleCount;
+    GLBufferStorage<uint32_t> gpuIndexOffset;
+
+    TriangleProgram(const fs::path& rootDir, const ShaderLibrary& shaderLibrary) : PathtracingProgram{ rootDir, shaderLibrary, "triangle_pathtracing.cs.glsl" }
+    {
+        RandomGenerator rng;
+
+        uint32_t discLat = 16;
+        uint32_t discLong = 8;
+        uint32_t vertexCount, indexCount;
+        tesselateSphereInfo(discLat, discLong, vertexCount, indexCount);
+
+        std::vector<uint32_t> triangleCount(sphereCount, indexCount / 3);
+        std::vector<uint32_t> indexOffset(sphereCount);
+        std::vector<uint32_t> indexBuffer(sphereCount * indexCount);
+        std::vector<float4> vertexBuffer(sphereCount * vertexCount);
+        std::vector<VertexAttributes> vertexAttrBuffer(sphereCount * vertexCount);
+
+        auto vertexID = 0;
+        auto addVertex = [&](float3 position, float3 normal, float2 texCoords)
+        {
+            vertexBuffer[vertexID] = float4(position, 1);
+            vertexAttrBuffer[vertexID].normal = normal;
+            vertexAttrBuffer[vertexID].texCoords = texCoords;
+            ++vertexID;
+        };
+
+        auto indexID = 0;
+        auto currentVertexOffset = 0;
+        auto addIndex = [&](uint32_t index)
+        {
+            indexBuffer[indexID] = currentVertexOffset + index;
+            ++indexID;
+        };
+
+        size_t i = 0;
+        for (const auto& sphere: computeSpheres()) {
+            indexOffset[i] = i * indexCount;
+            currentVertexOffset = i * vertexCount;
+
+            tesselateSphere(sphere.center, sqrt(sphere.sqrRadius), discLat, discLong, addVertex, addIndex);
+            ++i;
+        }
+
+        gpuVertexBuffer = makeBufferStorage(vertexBuffer);
+        gpuVertexAttrBuffer = makeBufferStorage(vertexAttrBuffer);
+        gpuIndexBuffer = makeBufferStorage(indexBuffer);
+        gpuTriangleCount = makeBufferStorage(triangleCount);
+        gpuIndexOffset = makeBufferStorage(indexOffset);
+        makeResident(gpuVertexBuffer, GL_READ_ONLY);
+        makeResident(gpuVertexAttrBuffer, GL_READ_ONLY);
+        makeResident(gpuIndexBuffer, GL_READ_ONLY);
+        makeResident(gpuTriangleCount, GL_READ_ONLY);
+        makeResident(gpuIndexOffset, GL_READ_ONLY);
+
+        uVertexBuffer.set(program, getAddress(gpuVertexBuffer));
+        uVertexAttributesBuffer.set(program, getAddress(gpuVertexAttrBuffer));
+        uIndexBuffer.set(program, getAddress(gpuIndexBuffer));
+        uTriangleCount.set(program, getAddress(gpuTriangleCount));
+        uIndexOffset.set(program, getAddress(gpuIndexOffset));
+        uMeshCount.set(program, sphereCount);
+    }
+};
+
 int Application::run()
 {
     float4x4 viewMatrix;
@@ -618,39 +817,8 @@ int Application::run()
 
     RandomGenerator rng;
 
-    auto worldSize = 1024.f;
     ViewController viewController{ m_pWindow, worldSize / 10.f };
     viewController.setViewMatrix(viewMatrix);
-
-    //viewController.setViewMatrix(transpose(float4x4(0.996, 0.015, 0.084, 12.503, 0.005, 0.974, -0.228, 1.748, -0.085, 0.227, 0.970, -325.982, 0.0, 0.0, 0.0, 1.0)));
-
-    auto program = compileProgram(m_ShadersRootPath, m_ShaderLibrary, "sphere_pathtracing.cs.glsl", "rand_tinymt32.cs.glsl");
-    program.use();
-
-    GLUniform<GLSLImage2Df> uOutputImage{ program, "uOutputImage" };
-    uOutputImage.set(program, OUTPUT_IMAGE_BINDING);
-
-    GLUniform<GLSLImage2Df> uAccumImage{ program, "uAccumImage" };
-    uAccumImage.set(program, ACCUM_IMAGE_BINDING);
-
-    GLUniform<GLuint> uIterationCount{ program, "uIterationCount" };
-
-    GLUniform<GLfloat4x4> uRcpViewProjMatrix{ program, "uRcpViewProjMatrix" };
-    C2BA_GLUNIFORM(program, GLfloat4x4, uRcpViewMatrix);
-    C2BA_GLUNIFORM(program, float, uProjTanHalfFovy);
-    C2BA_GLUNIFORM(program, float, uProjRatio);
-
-    GLUniform<GLfloat3> uCameraPosition{ program, "uCameraPosition" };
-
-    GLUniform<GLuint> uSphereCount{ program, "uSphereCount" };
-
-    C2BA_GLUNIFORM(program, GLuint, uTileCount);
-    C2BA_GLUNIFORM(program, GLuint, uTileOffset);
-    GLUniform<GLBufferAddress<Sphere>> uSphereArray{ program, "uSphereArray" };
-
-    GLUniform<GLBufferAddress<int2>> uTileArray{ program, "uTileArray" };
-
-    C2BA_GLUNIFORM(program, GLBufferAddress<tinymt32_t>, uRandomStateArray);
 
     size_t framebufferWidth = m_nWindowWidth;
     size_t framebufferHeight = m_nWindowHeight;
@@ -659,16 +827,11 @@ int Application::run()
     const auto projTanHalfFovy = tan(0.5f * radians(45.f));
     const auto& projMatrix = perspective(radians(45.f), float(framebufferWidth) / framebufferHeight, 0.01f, 100.f);
 
-    uProjRatio.set(projRatio);
-    uProjTanHalfFovy.set(projTanHalfFovy);
-
     const auto tileSize = 32;
     const auto tileCountX = GLint((framebufferWidth / tileSize) + (framebufferWidth % tileSize != 0));
     const auto tileCountY = GLint((framebufferHeight / tileSize) + (framebufferHeight % tileSize != 0));
     const auto tileCount = tileCountX * tileCountY;
     auto tileCountPerIteration = tileCountX;
-
-    uTileCount.set(program, tileCountX * tileCountY);
 
     auto computeTileVector = [&]()
     {
@@ -687,8 +850,6 @@ int Application::run()
     auto tileBuffer = makeBufferStorage(tileVector);
     auto tileBufferAddr = getAddress(tileBuffer);
     makeResident(tileBuffer, GL_READ_ONLY);
-
-    uTileArray.set(program, tileBufferAddr);
 
     GLFramebuffer2D<1, false> framebuffer;
     framebuffer.init(framebufferWidth, framebufferHeight, { GL_RGBA32F }, GL_NEAREST);
@@ -715,7 +876,6 @@ int Application::run()
     auto tinyMTStateVector = computeTinyMTStateVector();
     auto tinyMTStateBuffer = makeBufferStorage(tinyMTStateVector);
     makeResident(tinyMTStateBuffer, GL_READ_WRITE);
-    uRandomStateArray.set(program, getAddress(tinyMTStateBuffer));
 
     GLTexture2D accumImage;
     accumImage.setStorage(1, GL_RGBA32F, framebufferWidth, framebufferHeight);
@@ -728,44 +888,38 @@ int Application::run()
     // Draw on screen
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
-    auto sphereCount = 1024;
-    auto computeSpheres = [&]() {
-        std::vector<Sphere> spheres;
-        for (auto i = 0; i < sphereCount; ++i) {
-            spheres.emplace_back(
-                float3(-worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat(), -worldSize * 0.5f + worldSize * rng.getFloat()),
-                0.05f * worldSize * rng.getFloat()
-                );
-        }
-        return spheres;
-    };
+    //CPUSpherePathtracing spherePathracing;
+    //CPUSpherePathtracing::State pathtracingState;
+    //spherePathracing.uSphereArray = sphereVector.data();
+    //spherePathracing.uSphereCount = sphereCount;
 
-    // #todo improve buffer interface to be able to pass a memory layout instead of a single type
-    // Something like GLBuffer<GLBufferLayout<GLuint, Sphere[]>> myBuffer;
-    // Only one unspecified sized array allows, at the end of the type list
-    auto sphereVector = computeSpheres();
-    auto sphereBuffer = makeBufferStorage(sphereVector);
-    makeResident(sphereBuffer, GL_READ_ONLY);
-    uSphereArray.set(program, getAddress(sphereBuffer));
+    SphereProgram sphereProgram{ m_ShadersRootPath, m_ShaderLibrary };
+    TriangleProgram triangleProgram{ m_ShadersRootPath, m_ShaderLibrary };
 
-    CPUSpherePathtracing spherePathracing;
-    CPUSpherePathtracing::State pathtracingState;
-    spherePathracing.uSphereArray = sphereVector.data();
-    spherePathracing.uSphereCount = sphereCount;
-
-    std::cerr << projMatrix << std::endl;
-    std::cerr << inverse(projMatrix) << std::endl;
+    int rendererIndex = 1;
+    PathtracingProgram* renderers[] = { &sphereProgram, &triangleProgram };
+    PathtracingProgram* pCurrentProgram = renderers[rendererIndex];
 
     size_t tileOffset = 0;
     const auto gpuRender = [&](size_t iterationCount)
     {
-        uIterationCount.set(iterationCount);
+        pCurrentProgram->program.use();
+
+        pCurrentProgram->uProjRatio.set(projRatio);
+        pCurrentProgram->uProjTanHalfFovy.set(projTanHalfFovy);
+
+        pCurrentProgram->uTileCount.set(pCurrentProgram->program, tileCountX * tileCountY);
+        pCurrentProgram->uTileArray.set(pCurrentProgram->program, tileBufferAddr);
+
+        pCurrentProgram->uIterationCount.set(iterationCount);
         auto rcpViewProjMatrix = inverse(projMatrix * viewController.getViewMatrix());
-        uRcpViewProjMatrix.set(value_ptr(rcpViewProjMatrix));
-        uRcpViewMatrix.set(value_ptr(viewController.getRcpViewMatrix()));
-        uCameraPosition.set(value_ptr(viewController.getRcpViewMatrix()[3]));
-        uSphereCount.set(GLuint(sphereCount));
-        uTileOffset.set(tileOffset);
+        pCurrentProgram->uRcpViewProjMatrix.set(value_ptr(rcpViewProjMatrix));
+        pCurrentProgram->uRcpViewMatrix.set(value_ptr(viewController.getRcpViewMatrix()));
+        pCurrentProgram->uCameraPosition.set(value_ptr(viewController.getRcpViewMatrix()[3]));
+        
+        pCurrentProgram->uTileOffset.set(tileOffset);
+
+        pCurrentProgram->uRandomStateArray.set(pCurrentProgram->program, getAddress(tinyMTStateBuffer));
 
         glDispatchCompute(tileCountPerIteration, 1, 1);
 
@@ -773,20 +927,25 @@ int Application::run()
         tileOffset = tileOffset % tileCount;
     };
 
-    const auto cpuRender = [&](size_t iterationCount)
+    //const auto cpuRender = [&](size_t iterationCount)
+    //{
+    //    spherePathracing.uCameraPosition = float3(viewController.getRcpViewMatrix()[3]);
+    //    spherePathracing.uRcpViewMatrix = viewController.getRcpViewMatrix();
+    //    spherePathracing.uRcpViewProjMatrix = inverse(projMatrix * viewController.getViewMatrix());
+    //    spherePathracing.uRcpProjMatrix = inverse(projMatrix);
+
+    //    spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, tinyMTStateVector.data(), tileVector.data(), tileCountPerIteration, tileOffset);
+    //    framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
+
+    //    tileOffset += tileCountPerIteration;
+    //    tileOffset = tileOffset % tileCount;
+    //};
+
+    const auto clearFramebuffer = [&]()
     {
-        spherePathracing.uCameraPosition = float3(viewController.getRcpViewMatrix()[3]);
-        spherePathracing.uRcpViewMatrix = viewController.getRcpViewMatrix();
-        spherePathracing.uRcpViewProjMatrix = inverse(projMatrix * viewController.getViewMatrix());
-        spherePathracing.uRcpProjMatrix = inverse(projMatrix);
-
-        spherePathracing.render(cpuFinalImage.data(), cpuAccumImage.data(), framebufferWidth, framebufferHeight, tinyMTStateVector.data(), tileVector.data(), tileCountPerIteration, tileOffset);
-        framebuffer.getColorBuffer(0).setSubImage(0, GL_RGBA, GL_FLOAT, cpuFinalImage.data());
-
-        tileOffset += tileCountPerIteration;
-        tileOffset = tileOffset % tileCount;
+        accumImage.clear(0, GL_RGBA, GL_FLOAT, value_ptr(float4(0)));
+        std::fill(begin(cpuAccumImage), end(cpuAccumImage), float4(0));
     };
-
 
     /* Loop until the user closes the window */
     for (auto iterationCount = 0u; !glfwWindowShouldClose(m_pWindow); ++iterationCount) {
@@ -814,6 +973,12 @@ int Application::run()
             ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
             ImGui::InputInt("tileCountPerIteration", &tileCountPerIteration);
             
+            const char* rendererNames[] = { "spherePT", "trianglePT" };
+            if (ImGui::Combo("Renderer", &rendererIndex, rendererNames, 2)) {
+                pCurrentProgram = renderers[rendererIndex];
+                clearFramebuffer();
+            }
+
             ImGui::End();
         }
 
@@ -832,8 +997,7 @@ int Application::run()
         auto ellapsedTime = glfwGetTime() - seconds;
         auto guiHasFocus = ImGui::GetIO().WantCaptureMouse || ImGui::GetIO().WantCaptureKeyboard;
         if (!guiHasFocus && viewController.update(float(ellapsedTime))) {
-            accumImage.clear(0, GL_RGBA, GL_FLOAT, value_ptr(float4(0)));
-            std::fill(begin(cpuAccumImage), end(cpuAccumImage), float4(0));
+            clearFramebuffer();
         }
     }
 
